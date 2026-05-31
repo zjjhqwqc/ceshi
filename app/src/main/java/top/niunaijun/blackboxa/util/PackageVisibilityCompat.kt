@@ -71,17 +71,16 @@ object PackageVisibilityCompat {
      */
     private fun getInstalledApplicationsModern(pm: android.content.pm.PackageManager): List<ApplicationInfo> {
         // 方法1：使用标准 API + GET_UNINSTALLED_PACKAGES 标志
-        // 在 API 30+ 上，GET_UNINSTALLED_PACKAGES = 0x00008000 = MATCH_ALL
         try {
             val flags = android.content.pm.PackageManager.GET_UNINSTALLED_PACKAGES or
                     MATCH_DISABLED_COMPONENTS
 
-            val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val result: List<ApplicationInfo> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 // Android 13+ (API 33+): 使用 ApplicationInfoFlags
-                // ApplicationInfoFlags.of() 接受 int 类型参数
+                // ApplicationInfoFlags.of() 接受 Long 类型参数
                 @Suppress("DEPRECATION")
                 pm.getInstalledApplications(
-                    android.content.pm.PackageManager.ApplicationInfoFlags.of(flags)
+                    android.content.pm.PackageManager.ApplicationInfoFlags.of(flags.toLong())
                 )
             } else {
                 @Suppress("DEPRECATION")
@@ -102,25 +101,24 @@ object PackageVisibilityCompat {
             val apps = getInstalledPackagesViaActivityThread()
             if (apps.isNotEmpty()) {
                 Log.d(TAG, "Method 2 (ActivityThread reflection): got ${apps.size} apps")
-                return apps.map { it.applicationInfo }
+                return apps.mapNotNull { it.applicationInfo }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Method 2 failed: ${e.message}")
         }
 
         // 方法3：通过反射调用 IPackageManager.getInstalledPackages
-        // 参考 VirtualApp 商业版在 classes.dex/classes3.dex 中的实现
         try {
             val apps = getInstalledPackagesViaIPM()
             if (apps.isNotEmpty()) {
                 Log.d(TAG, "Method 3 (IPackageManager reflection): got ${apps.size} apps")
-                return apps.map { it.applicationInfo }
+                return apps.mapNotNull { it.applicationInfo }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Method 3 failed: ${e.message}")
         }
 
-        // 方法4：最终回退 - 使用标准 API 但不带特殊标志
+        // 方法4：最终回退
         Log.w(TAG, "All methods failed, falling back to basic API")
         return try {
             @Suppress("DEPRECATION")
@@ -138,9 +136,6 @@ object PackageVisibilityCompat {
      *
      * 参考 VirtualApp 的实现方式，直接从 ActivityThread 获取
      * 系统级 PackageManager 进行查询。
-     *
-     * ActivityThread.sPackageManager 是 ApplicationPackageManager 的底层 IPackageManager 代理，
-     * 通过它调用 getInstalledPackages(int flags, int userId) 可以绕过包可见性过滤。
      */
     @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
     private fun getInstalledPackagesViaActivityThread(): List<PackageInfo> {
@@ -151,30 +146,25 @@ object PackageVisibilityCompat {
             val activityThread = currentActivityThreadMethod.invoke(null)
                 ?: return emptyList()
 
-            // 获取 sPackageManager (类型为 IPackageManager)
             val sPmField = activityThreadClass.getDeclaredField("sPackageManager")
             sPmField.isAccessible = true
             val sPackageManager = sPmField.get(activityThread) ?: return emptyList()
 
-            // 调用 getInstalledPackages(int flags, int userId)
             val flags = GET_SIGNATURES or MATCH_ALL or MATCH_DISABLED_COMPONENTS
 
             val getInstalledPackagesMethod = sPackageManager.javaClass.getMethod(
                 "getInstalledPackages",
                 Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType // userId
+                Int::class.javaPrimitiveType
             )
             getInstalledPackagesMethod.isAccessible = true
 
-            // IPackageManager.getInstalledPackages 返回 ParceledListSlice<PackageInfo>
-            // 需要调用其 getList() 方法获取 List<PackageInfo>
             val result = getInstalledPackagesMethod.invoke(
                 sPackageManager,
                 flags,
-                0 // userId = 0 (主用户)
+                0
             ) ?: return emptyList()
 
-            // 处理 ParceledListSlice 返回类型
             return unwrapParceledListSlice(result)
         } catch (e: Exception) {
             Log.w(TAG, "ActivityThread reflection failed: ${e.message}")
@@ -185,23 +175,17 @@ object PackageVisibilityCompat {
     /**
      * 方法3：通过反射调用 IPackageManager.getInstalledPackages
      *
-     * 参考 VirtualApp 商业版在 classes.dex/classes3.dex 中的实现：
-     * 直接获取系统 IPackageManager 服务并调用其方法
-     *
-     * IPackageManager 接口签名（AOSP）：
-     *   ParceledListSlice<PackageInfo> getInstalledPackages(int flags, int userId);
+     * 参考 VirtualApp 商业版在 classes.dex/classes3.dex 中的实现
      */
     @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
     private fun getInstalledPackagesViaIPM(): List<PackageInfo> {
         try {
-            // 获取 IPackageManager 的 Binder 代理
             val pmClass = Class.forName("android.os.ServiceManager")
             val getServiceMethod = pmClass.getDeclaredMethod("getService", String::class.java)
             getServiceMethod.isAccessible = true
             val binder = getServiceMethod.invoke(null, "package") as? android.os.IBinder
                 ?: return emptyList()
 
-            // 获取 IPackageManager Stub
             val iPackageManagerClass = Class.forName("android.content.pm.IPackageManager")
             val asInterfaceMethod = iPackageManagerClass.getDeclaredMethod(
                 "asInterface",
@@ -210,24 +194,21 @@ object PackageVisibilityCompat {
             asInterfaceMethod.isAccessible = true
             val ipm = asInterfaceMethod.invoke(null, binder) ?: return emptyList()
 
-            // 调用 getInstalledPackages(int flags, int userId)
-            // 注意：AOSP 中第二个参数是 int userId，不是 String callingPackage
             val flags = GET_SIGNATURES or MATCH_ALL or MATCH_DISABLED_COMPONENTS
 
             val getInstalledPackagesMethod = iPackageManagerClass.getDeclaredMethod(
                 "getInstalledPackages",
                 Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType // userId (int 类型)
+                Int::class.javaPrimitiveType
             )
             getInstalledPackagesMethod.isAccessible = true
 
             val result = getInstalledPackagesMethod.invoke(
                 ipm,
                 flags,
-                0 // userId = 0 (主用户)
+                0
             ) ?: return emptyList()
 
-            // 处理 ParceledListSlice 返回类型
             return unwrapParceledListSlice(result)
         } catch (e: Exception) {
             Log.w(TAG, "IPackageManager reflection failed: ${e.message}")
@@ -237,23 +218,17 @@ object PackageVisibilityCompat {
 
     /**
      * 解包 ParceledListSlice 为 List
-     *
-     * IPackageManager 的 getInstalledPackages 等方法返回 ParceledListSlice<T>，
-     * 不是直接返回 List<T>。需要调用其 getList() 方法。
      */
     @Suppress("UNCHECKED_CAST")
     private fun <T> unwrapParceledListSlice(result: Any): List<T> {
         return try {
-            // 尝试直接转为 List（某些 Android 版本可能直接返回 List）
             if (result is List<*>) {
                 return result as List<T>
             }
-            // 调用 ParceledListSlice.getList()
             val getListMethod = result.javaClass.getMethod("getList")
             getListMethod.invoke(result) as? List<T> ?: emptyList()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to unwrap ParceledListSlice: ${e.message}")
-            // 最后尝试：直接作为 List 强转
             try {
                 result as? List<T> ?: emptyList()
             } catch (e2: Exception) {
@@ -268,12 +243,10 @@ object PackageVisibilityCompat {
     fun hasQueryAllPackagesPermission(pm: android.content.pm.PackageManager): Boolean {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // Android 13+ (API 33+): 使用 ApplicationInfoFlags
-                // ApplicationInfoFlags.of() 接受 int 类型参数
                 @Suppress("DEPRECATION")
                 pm.getInstalledApplications(
                     android.content.pm.PackageManager.ApplicationInfoFlags.of(
-                        android.content.pm.PackageManager.MATCH_ALL
+                        android.content.pm.PackageManager.MATCH_ALL.toLong()
                     )
                 ).isNotEmpty()
             } else {
