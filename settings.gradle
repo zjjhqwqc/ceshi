@@ -3,12 +3,6 @@ pluginManagement {
         flatDir {
             dirs "libs"
         }
-        maven { url "https://www.jitpack.io" }
-        maven { url 'https://maven.aliyun.com/repository/releases' }
-        maven { url 'https://maven.aliyun.com/repository/google' }
-        maven { url 'https://maven.aliyun.com/repository/central' }
-        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
-        maven { url 'https://maven.aliyun.com/repository/public' }
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
@@ -18,6 +12,10 @@ pluginManagement {
         }
         mavenCentral()
         gradlePluginPortal()
+        maven { url "https://www.jitpack.io" }
+        // 阿里云镜像作为后备
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
     }
 }
 dependencyResolutionManagement {
@@ -26,14 +24,13 @@ dependencyResolutionManagement {
         flatDir {
             dirs "libs"
         }
-        maven { url "https://www.jitpack.io" }
-        maven { url 'https://maven.aliyun.com/repository/releases' }
-        maven { url 'https://maven.aliyun.com/repository/google' }
-        maven { url 'https://maven.aliyun.com/repository/central' }
-        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
-        maven { url 'https://maven.aliyun.com/repository/public' }
+        // 优先使用官方仓库
         google()
         mavenCentral()
+        maven { url "https://www.jitpack.io" }
+        // 阿里云镜像作为后备
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
     }
 }
 
