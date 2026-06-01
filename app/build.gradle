@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.jetbrains.kotlin.android)
+    id 'kotlin-kapt'
 }
 
 android {
@@ -40,6 +41,7 @@ android {
     }
     buildFeatures {
         viewBinding true
+        dataBinding true
     }
     kotlinOptions {
         jvmTarget = '17'
@@ -76,6 +78,7 @@ dependencies {
     implementation 'com.github.Othershe:CornerLabelView:1.0.0'
     //dialog - StateView for loading/empty/retry views
     implementation 'com.github.nukc:stateview:v3.0.6'
+    kapt 'com.github.nukc:stateview:v3.0.6'
     //加载dialog
     implementation 'com.github.Ferfalk:SimpleSearchView:0.2.0'
     implementation 'com.tbuonomo:dotsindicator:4.2'
