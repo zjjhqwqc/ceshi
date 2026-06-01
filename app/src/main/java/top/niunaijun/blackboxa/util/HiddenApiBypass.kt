@@ -28,6 +28,8 @@ object HiddenApiBypass {
      *
      * 原理：通过反射调用 dalvik.system.VMRuntime.setHiddenApiExemptions()
      * 传入空字符串数组，表示豁免所有隐藏 API 的限制检查
+     *
+     * 注意：在 Android 15/16 上，此方法可能部分失效，需要配合其他策略
      */
     @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
     fun bypassHiddenApiRestrictions() {
@@ -41,12 +43,17 @@ object HiddenApiBypass {
                 getRuntimeMethod.isAccessible = true
                 val vmRuntime = getRuntimeMethod.invoke(null)
 
-                val setHiddenApiExemptionsMethod: Method =
-                    vmRuntimeClass.getDeclaredMethod("setHiddenApiExemptions", Array<String>::class.java)
-                setHiddenApiExemptionsMethod.isAccessible = true
-
-                // 传入空数组表示豁免所有类的隐藏 API 限制
-                setHiddenApiExemptionsMethod.invoke(vmRuntime, emptyArray<String>())
+                // Android 15+ (API 35+) 可能需要特殊处理
+                if (Build.VERSION.SDK_INT >= 35) {
+                    // 尝试新的豁免方法
+                    tryBypassAndroid15Plus(vmRuntimeClass, vmRuntime)
+                } else {
+                    // Android 9-14 使用标准方法
+                    val setHiddenApiExemptionsMethod: Method =
+                        vmRuntimeClass.getDeclaredMethod("setHiddenApiExemptions", Array<String>::class.java)
+                    setHiddenApiExemptionsMethod.isAccessible = true
+                    setHiddenApiExemptionsMethod.invoke(vmRuntime, emptyArray<String>())
+                }
 
                 isBypassed = true
                 Log.d(TAG, "Hidden API bypass successful on SDK ${Build.VERSION.SDK_INT}")
@@ -55,6 +62,67 @@ object HiddenApiBypass {
             Log.e(TAG, "Failed to bypass hidden API restrictions: ${e.message}")
             // 尝试备用方案
             tryBackupBypass()
+        }
+    }
+
+    /**
+     * Android 15+ (API 35+) 的特殊处理
+     * 尝试多种方法绕过限制
+     */
+    @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
+    private fun tryBypassAndroid15Plus(vmRuntimeClass: Class<*>, vmRuntime: Any?) {
+        if (vmRuntime == null) return
+
+        var success = false
+
+        // 方法1: 尝试 setHiddenApiExemptions
+        try {
+            val setHiddenApiExemptionsMethod = vmRuntimeClass.getDeclaredMethod(
+                "setHiddenApiExemptions", Array<String>::class.java
+            )
+            setHiddenApiExemptionsMethod.isAccessible = true
+            setHiddenApiExemptionsMethod.invoke(vmRuntime, emptyArray<String>())
+            success = true
+            Log.d(TAG, "Android 15+ bypass method 1 successful")
+        } catch (e: Exception) {
+            Log.w(TAG, "Android 15+ bypass method 1 failed: ${e.message}")
+        }
+
+        // 方法2: 尝试 setHiddenApiEnforcementPolicy
+        if (!success) {
+            try {
+                val setMethod = vmRuntimeClass.getDeclaredMethod(
+                    "setHiddenApiEnforcementPolicy",
+                    Int::class.javaPrimitiveType
+                )
+                setMethod.isAccessible = true
+                // 0 = no enforcement (允许所有隐藏 API)
+                setMethod.invoke(vmRuntime, 0)
+                success = true
+                Log.d(TAG, "Android 15+ bypass method 2 successful")
+            } catch (e: Exception) {
+                Log.w(TAG, "Android 15+ bypass method 2 failed: ${e.message}")
+            }
+        }
+
+        // 方法3: 尝试通过元数据豁免
+        if (!success) {
+            try {
+                // 尝试调用 native 方法或设置系统属性
+                val addHiddenApiExemptionsMethod = vmRuntimeClass.getDeclaredMethod(
+                    "addHiddenApiExemptions", Array<String>::class.java
+                )
+                addHiddenApiExemptionsMethod.isAccessible = true
+                addHiddenApiExemptionsMethod.invoke(vmRuntime, arrayOf(""))
+                success = true
+                Log.d(TAG, "Android 15+ bypass method 3 successful")
+            } catch (e: Exception) {
+                Log.w(TAG, "Android 15+ bypass method 3 failed: ${e.message}")
+            }
+        }
+
+        if (!success) {
+            Log.w(TAG, "All Android 15+ bypass methods failed, continuing without full bypass")
         }
     }
 
@@ -88,5 +156,12 @@ object HiddenApiBypass {
         } catch (e: Exception) {
             Log.e(TAG, "Backup bypass error: ${e.message}")
         }
+    }
+
+    /**
+     * 检查是否成功绕过隐藏 API 限制
+     */
+    fun isBypassed(): Boolean {
+        return isBypassed
     }
 }
