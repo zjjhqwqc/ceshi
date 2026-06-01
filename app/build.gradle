@@ -74,8 +74,8 @@ dependencies {
 
     //searchView
     implementation 'com.github.Othershe:CornerLabelView:1.0.0'
-    //dialog
-    implementation 'com.github.nukc.stateview:kotlin:2.2.0'
+    //dialog - StateView for loading/empty/retry views
+    implementation 'com.github.nukc:stateview:v3.0.6'
     //加载dialog
     implementation 'com.github.Ferfalk:SimpleSearchView:0.2.0'
     implementation 'com.tbuonomo:dotsindicator:4.2'
