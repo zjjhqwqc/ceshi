@@ -24,10 +24,11 @@ dependencyResolutionManagement {
         flatDir {
             dirs "libs"
         }
+        // JitPack 需要放在前面以解析 com.github 依赖
+        maven { url "https://www.jitpack.io" }
         // 优先使用官方仓库
         google()
         mavenCentral()
-        maven { url "https://www.jitpack.io" }
         // 阿里云镜像作为后备
         maven { url 'https://maven.aliyun.com/repository/google' }
         maven { url 'https://maven.aliyun.com/repository/central' }
