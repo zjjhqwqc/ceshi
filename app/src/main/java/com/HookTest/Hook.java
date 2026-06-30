@@ -103,11 +103,11 @@ public class Hook implements IXposedHookLoadPackage {
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         // Hook蓝月亮APP包名
-        if (!lpparam.packageName.equals("cn.com.bluemoon")) {
+        if (!lpparam.packageName.equals("cn.com.bluemoon.sfa")) {
             return;
         }
 
-        Log.e(TAG, "包名匹配(蓝月亮)，开始Hook");
+        Log.e(TAG, "包名匹配(蓝月亮sfa)，开始Hook");
 
         // 直接在 handleLoadPackage 中初始化并执行 Hook
         try {
