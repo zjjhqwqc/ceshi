@@ -156,7 +156,44 @@ public class Hook implements IXposedHookLoadPackage {
             Log.e(TAG, "currentApplication 获取失败", t);
         }
 
-        // Hook Activity.onCreate 显示悬浮窗
+        // Hook RNMainActivity.onCreate 注入悬浮窗 + 处理相册返回
+        try {
+            XposedHelpers.findAndHookMethod("cn.com.bluemoon.sfa.RNMainActivity",
+                    lpparam.classLoader, "onCreate", Bundle.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    Activity activity = (Activity) param.thisObject;
+                    homeActivity = activity;
+                    hostActivity = activity;
+                    Log.e(TAG, "RNMainActivity onCreate, 注入悬浮窗");
+                    uiHandler.postDelayed(() -> {
+                        try {
+                            contentParent = (ViewGroup) activity.findViewById(android.R.id.content);
+                            if (floatView == null) {
+                                showFloatWindow(activity);
+                            }
+                        } catch (Throwable t2) {
+                            Log.e(TAG, "RNMainActivity 注入悬浮窗失败", t2);
+                        }
+                    }, 800);
+                }
+            });
+            XposedHelpers.findAndHookMethod("cn.com.bluemoon.sfa.RNMainActivity",
+                    lpparam.classLoader, "onActivityResult", int.class, int.class, Intent.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    int requestCode = (int) param.args[0];
+                    int resultCode = (int) param.args[1];
+                    Intent data = (Intent) param.args[2];
+                    handleActivityResult(requestCode, resultCode, data);
+                }
+            });
+            Log.e(TAG, "RNMainActivity Hook成功");
+        } catch (Throwable t) {
+            Log.e(TAG, "Hook RNMainActivity 失败", t);
+        }
+
+        // 兜底：Hook 所有 bluemoon Activity.onCreate 显示悬浮窗
         try {
             XposedHelpers.findAndHookMethod(Activity.class, "onCreate", Bundle.class, new XC_MethodHook() {
                 private boolean shown = false;
@@ -169,7 +206,7 @@ public class Hook implements IXposedHookLoadPackage {
                         if (homeActivity == null && activity.getClass().getName().contains("Main")) {
                             homeActivity = activity;
                         }
-                        Log.e(TAG, "Activity onResume 兜底显示悬浮窗: " + activity.getClass().getName());
+                        Log.e(TAG, "Activity onCreate 兜底显示悬浮窗: " + activity.getClass().getName());
                         uiHandler.postDelayed(() -> {
                             try {
                                 hostActivity = activity;
@@ -185,33 +222,7 @@ public class Hook implements IXposedHookLoadPackage {
                 }
             });
         } catch (Throwable t) {
-            Log.e(TAG, "Hook Activity.onCreate 失败", t);
-        }
-
-        // Hook HomeActivity 获取实例并处理相册返回
-        try {
-            XposedHelpers.findAndHookMethod("cn.com.bluemoon.home.HomeActivity",
-                    lpparam.classLoader, "onCreate", Bundle.class, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    homeActivity = (Activity) param.thisObject;
-                    hostActivity = homeActivity;
-                    Log.e(TAG, "HomeActivity onCreate");
-                }
-            });
-            XposedHelpers.findAndHookMethod("cn.com.bluemoon.home.HomeActivity",
-                    lpparam.classLoader, "onActivityResult", int.class, int.class, Intent.class, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    int requestCode = (int) param.args[0];
-                    int resultCode = (int) param.args[1];
-                    Intent data = (Intent) param.args[2];
-                    handleActivityResult(requestCode, resultCode, data);
-                }
-            });
-            Log.e(TAG, "HomeActivity Hook成功");
-        } catch (Throwable t) {
-            Log.e(TAG, "Hook HomeActivity 失败", t);
+            Log.e(TAG, "Hook Activity.onCreate 兜底失败", t);
         }
 
         // Hook 所有Activity的 onActivityResult 作为图片选择结果兜底
