@@ -302,11 +302,18 @@ public class Hook implements IXposedHookLoadPackage {
                     return;
                 }
 
-                // 尝试获取DecorView的根视图
-                android.view.ViewRootImpl root = (android.view.ViewRootImpl) contentParent.getParent();
-                if (root == null) {
-                    // 尝试通过DecorView检查
-                    Log.e(TAG, "ViewRootImpl为空，重试(" + retryCount + ")");
+                // 检查DecorView是否已挂载到Window上
+                try {
+                    Object parent = contentParent.getParent();
+                    if (parent == null) {
+                        Log.e(TAG, "contentParent.parent为空，视图树未就绪，重试(" + retryCount + ")");
+                        if (retryCount < 20) {
+                            injectFloatWindowWithRetry(activity, retryCount + 1);
+                        }
+                        return;
+                    }
+                } catch (Throwable checkErr) {
+                    Log.e(TAG, "检查视图树异常，重试(" + retryCount + ")");
                     if (retryCount < 20) {
                         injectFloatWindowWithRetry(activity, retryCount + 1);
                     }
