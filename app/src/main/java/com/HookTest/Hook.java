@@ -44,12 +44,16 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.lang.reflect.Field;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -2208,6 +2212,12 @@ public class Hook implements IXposedHookLoadPackage {
             imageRotations.clear();
         }
         Log.e(TAG, "配置已加载: loc=" + locationEnabled + " cam=" + cameraEnabled);
+        // 如果经纬度已设置但地址为空，自动触发逆地理编码
+        String mockAddr = sh.getString("mockAddress", "");
+        if (!customLat.isEmpty() && !customLng.isEmpty() && mockAddr.isEmpty()) {
+            Log.e(TAG, "经纬度已设置但地址为空，自动触发逆地理编码");
+            reverseGeocodeAsync();
+        }
     }
 
     private void savePrefs() {
@@ -2233,6 +2243,85 @@ public class Hook implements IXposedHookLoadPackage {
         editor.putString("imageRotations", rotArr.toString());
         editor.apply();
         Log.e(TAG, "配置已保存");
+        // 经纬度变化时自动触发逆地理编码
+        if (!customLat.isEmpty() && !customLng.isEmpty()) {
+            reverseGeocodeAsync();
+        }
+    }
+
+    /**
+     * 使用高德地图Web API进行逆地理编码，将虚拟经纬度自动转换为地址
+     */
+    private void reverseGeocodeAsync() {
+        if (appContext == null || customLat.isEmpty() || customLng.isEmpty()) return;
+        new Thread(() -> {
+            try {
+                // 使用蓝月亮APK中提取的高德key
+                String apiKey = "ed6016242c8f18984ac27a01ec82d241";
+                String urlStr = "https://restapi.amap.com/v3/geocode/regeo?key=" + apiKey
+                        + "&location=" + customLng + "," + customLat
+                        + "&extensions=all";
+                HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(8000);
+                conn.setRequestMethod("GET");
+                int code = conn.getResponseCode();
+                if (code == 200) {
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) sb.append(line);
+                    reader.close();
+                    String jsonStr = sb.toString();
+                    Log.e(TAG, "逆地理编码响应: " + jsonStr);
+                    JSONObject json = new JSONObject(jsonStr);
+                    if ("1".equals(json.optString("status"))) {
+                        JSONObject regeocode = json.optJSONObject("regeocode");
+                        if (regeocode != null) {
+                            String formattedAddress = regeocode.optString("formatted_address", "");
+                            JSONObject addrComp = regeocode.optJSONObject("addressComponent");
+                            String province = "";
+                            String city = "";
+                            String district = "";
+                            String street = "";
+                            String adcode = "";
+                            String citycode = "";
+                            if (addrComp != null) {
+                                province = addrComp.optString("province", "");
+                                city = addrComp.optString("city", "");
+                                if (city.isEmpty()) city = addrComp.optString("citycode", "");
+                                district = addrComp.optString("district", "");
+                                street = addrComp.optString("street", "");
+                                adcode = addrComp.optString("adcode", "");
+                                citycode = addrComp.optString("citycode", "");
+                            }
+                            SharedPreferences.Editor ed = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit();
+                            ed.putString("mockAddress", formattedAddress);
+                            ed.putString("mockProvince", province);
+                            ed.putString("mockCity", city);
+                            ed.putString("mockDistrict", district);
+                            ed.putString("mockStreet", street);
+                            ed.putString("mockAdCode", adcode);
+                            ed.putString("mockCityCode", citycode);
+                            ed.apply();
+                            Log.e(TAG, "逆地理编码成功: " + formattedAddress + " [" + province + city + district + "]");
+                            uiHandler.post(() -> {
+                                if (appContext != null) {
+                                    Toast.makeText(appContext, "已自动获取地址: " + formattedAddress, Toast.LENGTH_LONG).show();
+                                }
+                            });
+                        }
+                    } else {
+                        String info = json.optString("info", "未知错误");
+                        Log.e(TAG, "逆地理编码API错误: " + info);
+                    }
+                } else {
+                    Log.e(TAG, "逆地理编码HTTP错误: " + code);
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "逆地理编码异常", e);
+            }
+        }).start();
     }
 
     // ---- UI辅助 ----
