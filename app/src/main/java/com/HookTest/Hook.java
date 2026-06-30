@@ -150,6 +150,26 @@ public class Hook implements IXposedHookLoadPackage {
             Log.e(TAG, "currentApplication 兜底获取失败", t);
         }
 
+        // Hook MainActivity（它是真正的启动入口，会立即finish并启动RNMainActivity）
+        try {
+            XposedHelpers.findAndHookMethod("cn.com.bluemoon.sfa.MainActivity",
+                    lpparam.classLoader, "onCreate", Bundle.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    Log.e(TAG, "MainActivity onCreate - 启动入口");
+                    // 尝试在这里获取Context并提前初始化
+                    if (appContext == null) {
+                        Activity activity = (Activity) param.thisObject;
+                        appContext = activity.getApplicationContext();
+                        executeHooks(lpparam);
+                    }
+                }
+            });
+            Log.e(TAG, "MainActivity Hook成功");
+        } catch (Throwable t) {
+            Log.e(TAG, "Hook MainActivity 失败", t);
+        }
+
         // Hook RNMainActivity.onCreate 注入悬浮窗 + 处理相册返回
         try {
             XposedHelpers.findAndHookMethod("cn.com.bluemoon.sfa.RNMainActivity",
@@ -160,16 +180,18 @@ public class Hook implements IXposedHookLoadPackage {
                     homeActivity = activity;
                     hostActivity = activity;
                     Log.e(TAG, "RNMainActivity onCreate, 注入悬浮窗");
-                    uiHandler.postDelayed(() -> {
-                        try {
-                            contentParent = (ViewGroup) activity.findViewById(android.R.id.content);
-                            if (floatView == null) {
-                                showFloatWindow(activity);
-                            }
-                        } catch (Throwable t2) {
-                            Log.e(TAG, "RNMainActivity 注入悬浮窗失败", t2);
-                        }
-                    }, 800);
+                    injectFloatWindowWithRetry(activity, 0);
+                }
+            });
+            XposedHelpers.findAndHookMethod("cn.com.bluemoon.sfa.RNMainActivity",
+                    lpparam.classLoader, "onResume", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    Activity activity = (Activity) param.thisObject;
+                    if (floatView == null) {
+                        Log.e(TAG, "RNMainActivity onResume 兜底注入悬浮窗");
+                        injectFloatWindowWithRetry(activity, 0);
+                    }
                 }
             });
             XposedHelpers.findAndHookMethod("cn.com.bluemoon.sfa.RNMainActivity",
@@ -201,17 +223,7 @@ public class Hook implements IXposedHookLoadPackage {
                             homeActivity = activity;
                         }
                         Log.e(TAG, "Activity onCreate 兜底显示悬浮窗: " + activity.getClass().getName());
-                        uiHandler.postDelayed(() -> {
-                            try {
-                                hostActivity = activity;
-                                contentParent = (ViewGroup) activity.findViewById(android.R.id.content);
-                                if (floatView == null) {
-                                    showFloatWindow(activity);
-                                }
-                            } catch (Throwable t2) {
-                                Log.e(TAG, "兜底显示悬浮窗失败", t2);
-                            }
-                        }, 500);
+                        injectFloatWindowWithRetry(activity, 0);
                     }
                 }
             });
@@ -254,6 +266,62 @@ public class Hook implements IXposedHookLoadPackage {
         hookCellLocation(lpparam);
         hookCamera(lpparam);
         Log.e(TAG, "所有 Hooks 执行完毕");
+    }
+
+    // ======================== 悬浮窗注入（带重试） ========================
+
+    /**
+     * 使用重试机制注入悬浮窗，解决RN异步渲染导致contentParent暂时为空的问题
+     * @param activity 目标Activity
+     * @param retryCount 当前重试次数
+     */
+    private void injectFloatWindowWithRetry(final Activity activity, final int retryCount) {
+        if (floatView != null) {
+            Log.e(TAG, "悬浮窗已存在，跳过注入");
+            return;
+        }
+        uiHandler.postDelayed(() -> {
+            try {
+                // 检查Activity是否仍然存活
+                if (activity.isFinishing() || activity.isDestroyed()) {
+                    Log.e(TAG, "Activity已finish/destroy，停止注入");
+                    return;
+                }
+
+                hostActivity = activity;
+                contentParent = (ViewGroup) activity.findViewById(android.R.id.content);
+
+                // 检查DecorView是否已准备好
+                if (contentParent == null) {
+                    Log.e(TAG, "contentParent为空，重试(" + retryCount + ")");
+                    if (retryCount < 20) {
+                        injectFloatWindowWithRetry(activity, retryCount + 1);
+                    } else {
+                        Log.e(TAG, "重试20次仍无法获取contentParent，放弃注入");
+                    }
+                    return;
+                }
+
+                // 尝试获取DecorView的根视图
+                android.view.ViewRootImpl root = (android.view.ViewRootImpl) contentParent.getParent();
+                if (root == null) {
+                    // 尝试通过DecorView检查
+                    Log.e(TAG, "ViewRootImpl为空，重试(" + retryCount + ")");
+                    if (retryCount < 20) {
+                        injectFloatWindowWithRetry(activity, retryCount + 1);
+                    }
+                    return;
+                }
+
+                Log.e(TAG, "contentParent就绪，注入悬浮窗 (retry=" + retryCount + ")");
+                showFloatWindow(activity);
+            } catch (Throwable t) {
+                Log.e(TAG, "injectFloatWindowWithRetry异常", t);
+                if (retryCount < 20) {
+                    injectFloatWindowWithRetry(activity, retryCount + 1);
+                }
+            }
+        }, 500); // 每500ms重试一次
     }
 
     // ======================== 悬浮窗UI ========================
