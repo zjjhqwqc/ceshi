@@ -250,6 +250,13 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
+    // 模拟定位的地址信息（逆地理编码结果）
+    private static String mockAddress = "";
+    private static String mockProvince = "";
+    private static String mockCity = "";
+    private static String mockDistrict = "";
+    private static String mockStreet = "";
+
     // ======================== Hook 统一执行入口 ========================
 
     private void executeHooks(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -264,6 +271,7 @@ public class Hook implements IXposedHookLoadPackage {
         hookSystemLocation(lpparam);
         hookTencentLocation(lpparam);
         hookCellLocation(lpparam);
+        hookLocationResult(lpparam);
         hookCamera(lpparam);
         Log.e(TAG, "所有 Hooks 执行完毕");
     }
@@ -698,6 +706,54 @@ public class Hook implements IXposedHookLoadPackage {
         mapPickerBtn.setText("地图选点");
         mapPickerBtn.setOnClickListener(v -> showMapPicker(ctx));
         layout.addView(mapPickerBtn);
+
+        addDivider(layout);
+
+        // ---- 模拟地址信息（用于逆地理编码Hook） ----
+        layout.addView(createLabel(ctx, "模拟地址（选填，用于上方\"当前位置\"显示）:"));
+        EditText addrEdit = createEditText(ctx, "", "例如: 湖北省武汉市江岸区车站路103号");
+        addrEdit.addTextChangedListener(new SimpleTextWatcher(s -> {
+            appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("mockAddress", s).apply();
+        }));
+        layout.addView(addrEdit);
+
+        layout.addView(createLabel(ctx, "省份（选填）:"));
+        EditText provinceEdit = createEditText(ctx, "", "例如: 湖北省");
+        provinceEdit.addTextChangedListener(new SimpleTextWatcher(s -> {
+            appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("mockProvince", s).apply();
+        }));
+        layout.addView(provinceEdit);
+
+        LinearLayout cityDistrictRow = new LinearLayout(ctx);
+        cityDistrictRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        cityDistrictRow.setLayoutParams(rowParams);
+        cityDistrictRow.setWeightSum(2f);
+
+        LinearLayout cityCol = new LinearLayout(ctx);
+        cityCol.setOrientation(LinearLayout.VERTICAL);
+        cityCol.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        cityCol.addView(createLabel(ctx, "城市:"));
+        EditText cityEdit = createEditText(ctx, "", "武汉市");
+        cityEdit.addTextChangedListener(new SimpleTextWatcher(s -> {
+            appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("mockCity", s).apply();
+        }));
+        cityCol.addView(cityEdit);
+
+        LinearLayout districtCol = new LinearLayout(ctx);
+        districtCol.setOrientation(LinearLayout.VERTICAL);
+        districtCol.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        districtCol.addView(createLabel(ctx, "区县:"));
+        EditText districtEdit = createEditText(ctx, "", "江岸区");
+        districtEdit.addTextChangedListener(new SimpleTextWatcher(s -> {
+            appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().putString("mockDistrict", s).apply();
+        }));
+        districtCol.addView(districtEdit);
+
+        cityDistrictRow.addView(cityCol);
+        cityDistrictRow.addView(districtCol);
+        layout.addView(cityDistrictRow);
 
         addDivider(layout);
 
@@ -1205,6 +1261,88 @@ public class Hook implements IXposedHookLoadPackage {
         try {
             ClassLoader cl = lpparam.classLoader;
             Class<?> aMapLocationClass = cl.loadClass("com.amap.api.location.AMapLocation");
+
+            // Hook getAddress - 返回模拟地址字符串
+            XposedHelpers.findAndHookMethod(aMapLocationClass, "getAddress", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    if (!sh.getBoolean("locationEnabled", false)) return;
+                    String addr = sh.getString("mockAddress", "");
+                    if (!addr.isEmpty()) {
+                        param.setResult(addr);
+                        Log.e(TAG, "Hook AMapLocation.getAddress: " + addr);
+                    }
+                }
+            });
+
+            // Hook getProvince
+            XposedHelpers.findAndHookMethod(aMapLocationClass, "getProvince", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    if (!sh.getBoolean("locationEnabled", false)) return;
+                    String val = sh.getString("mockProvince", "");
+                    if (!val.isEmpty()) param.setResult(val);
+                }
+            });
+
+            // Hook getCity
+            XposedHelpers.findAndHookMethod(aMapLocationClass, "getCity", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    if (!sh.getBoolean("locationEnabled", false)) return;
+                    String val = sh.getString("mockCity", "");
+                    if (!val.isEmpty()) param.setResult(val);
+                }
+            });
+
+            // Hook getDistrict
+            XposedHelpers.findAndHookMethod(aMapLocationClass, "getDistrict", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    if (!sh.getBoolean("locationEnabled", false)) return;
+                    String val = sh.getString("mockDistrict", "");
+                    if (!val.isEmpty()) param.setResult(val);
+                }
+            });
+
+            // Hook getStreet
+            XposedHelpers.findAndHookMethod(aMapLocationClass, "getStreet", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    if (!sh.getBoolean("locationEnabled", false)) return;
+                    String val = sh.getString("mockStreet", "");
+                    if (!val.isEmpty()) param.setResult(val);
+                }
+            });
+
+            // Hook getCityCode
+            XposedHelpers.findAndHookMethod(aMapLocationClass, "getCityCode", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    if (!sh.getBoolean("locationEnabled", false)) return;
+                    String val = sh.getString("mockCityCode", "");
+                    if (!val.isEmpty()) param.setResult(val);
+                }
+            });
+
+            // Hook getAdCode
+            XposedHelpers.findAndHookMethod(aMapLocationClass, "getAdCode", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    if (!sh.getBoolean("locationEnabled", false)) return;
+                    String val = sh.getString("mockAdCode", "");
+                    if (!val.isEmpty()) param.setResult(val);
+                }
+            });
+
+            // Hook getLatitude
             XposedHelpers.findAndHookMethod(aMapLocationClass, "getLatitude", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
@@ -1222,6 +1360,7 @@ public class Hook implements IXposedHookLoadPackage {
                     }
                 }
             });
+            // Hook getLongitude
             XposedHelpers.findAndHookMethod(aMapLocationClass, "getLongitude", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
@@ -1239,7 +1378,21 @@ public class Hook implements IXposedHookLoadPackage {
                     }
                 }
             });
-            Log.e(TAG, "高德定位Hook成功");
+
+            // Hook isMock 返回 false，防止被检测为模拟位置
+            try {
+                XposedHelpers.findAndHookMethod(aMapLocationClass, "isMock", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                        if (sh.getBoolean("locationEnabled", false)) {
+                            param.setResult(false);
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {}
+
+            Log.e(TAG, "高德定位Hook成功(含地址)");
         } catch (Throwable t) {
             Log.e(TAG, "高德定位Hook失败", t);
         }
@@ -1335,7 +1488,44 @@ public class Hook implements IXposedHookLoadPackage {
                         } catch (NumberFormatException ignored) {}
                     }
                 });
-                Log.e(TAG, "腾讯定位 TencentLocation Hook成功");
+                // Hook TencentLocation.getAddress
+                XposedHelpers.findAndHookMethod(tencentLocClass, "getAddress", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                        if (!sh.getBoolean("locationEnabled", false)) return;
+                        String addr = sh.getString("mockAddress", "");
+                        if (!addr.isEmpty()) {
+                            param.setResult(addr);
+                            Log.e(TAG, "Hook TencentLocation.getAddress: " + addr);
+                        }
+                    }
+                });
+                // Hook TencentLocation.getCity
+                try {
+                    XposedHelpers.findAndHookMethod(tencentLocClass, "getCity", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                            if (!sh.getBoolean("locationEnabled", false)) return;
+                            String val = sh.getString("mockCity", "");
+                            if (!val.isEmpty()) param.setResult(val);
+                        }
+                    });
+                } catch (Throwable ignored) {}
+                // Hook TencentLocation.getDistrict
+                try {
+                    XposedHelpers.findAndHookMethod(tencentLocClass, "getDistrict", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                            if (!sh.getBoolean("locationEnabled", false)) return;
+                            String val = sh.getString("mockDistrict", "");
+                            if (!val.isEmpty()) param.setResult(val);
+                        }
+                    });
+                } catch (Throwable ignored) {}
+                Log.e(TAG, "腾讯定位 TencentLocation Hook成功(含地址)");
             } catch (Throwable t) {
                 Log.e(TAG, "腾讯定位 TencentLocation Hook失败", t);
             }
@@ -1348,13 +1538,6 @@ public class Hook implements IXposedHookLoadPackage {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                         if (!sh.getBoolean("locationEnabled", false)) return;
-                        Object tencentLoc = param.getResult();
-                        if (tencentLoc == null) return;
-                        String latStr = sh.getString("lat", "");
-                        String lngStr = sh.getString("lng", "");
-                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
-                        // Hook TencentLocation对象的方法已经在上面处理，这里不需要额外操作
-                        // 但如果APP直接使用TencentLocationManager获取对象后调用其他方法，确保返回对象不为null
                         Log.e(TAG, "Hook TencentLocationManager.getLastKnownLocation");
                     }
                 });
@@ -1406,6 +1589,53 @@ public class Hook implements IXposedHookLoadPackage {
             Log.e(TAG, "基站定位Hook成功");
         } catch (Throwable t) {
             Log.e(TAG, "基站定位Hook失败", t);
+        }
+    }
+
+    /**
+     * Hook LocationResult.getGpsAddress - 蓝月亮内部定位结果类
+     * 确保APP内部所有读取gpsAddress的地方都拿到模拟地址
+     */
+    private void hookLocationResult(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            ClassLoader cl = lpparam.classLoader;
+            Class<?> locationResultClass = cl.loadClass("cn.com.bluemoon.sfa.utils.location.LocationResult");
+            XposedHelpers.findAndHookMethod(locationResultClass, "getGpsAddress", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    if (!sh.getBoolean("locationEnabled", false)) return;
+                    String addr = sh.getString("mockAddress", "");
+                    if (!addr.isEmpty()) {
+                        param.setResult(addr);
+                        Log.e(TAG, "Hook LocationResult.getGpsAddress: " + addr);
+                    }
+                }
+            });
+            Log.e(TAG, "LocationResult.getGpsAddress Hook成功");
+        } catch (Throwable t) {
+            Log.e(TAG, "LocationResult.getGpsAddress Hook失败: " + t.getMessage());
+        }
+
+        // Hook LocationParam.getGpsAddress（另一套定位参数类）
+        try {
+            ClassLoader cl = lpparam.classLoader;
+            Class<?> locationParamClass = cl.loadClass("bluemoon.com.lib_x5.bean.LocationParam");
+            XposedHelpers.findAndHookMethod(locationParamClass, "getGpsAddress", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                    if (!sh.getBoolean("locationEnabled", false)) return;
+                    String addr = sh.getString("mockAddress", "");
+                    if (!addr.isEmpty()) {
+                        param.setResult(addr);
+                        Log.e(TAG, "Hook LocationParam.getGpsAddress: " + addr);
+                    }
+                }
+            });
+            Log.e(TAG, "LocationParam.getGpsAddress Hook成功");
+        } catch (Throwable t) {
+            Log.e(TAG, "LocationParam.getGpsAddress Hook失败: " + t.getMessage());
         }
     }
 
