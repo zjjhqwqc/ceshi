@@ -100,6 +100,9 @@ public class Hook implements IXposedHookLoadPackage {
     // 已Hook的PictureCallback类去重列表
     private static java.util.List<String> hookedPictureClasses = new java.util.ArrayList<>();
 
+    // Hook执行标志，防止LSPatch等环境下重复执行
+    private static volatile boolean hooksExecuted = false;
+
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         // Hook蓝月亮APP包名
@@ -109,31 +112,27 @@ public class Hook implements IXposedHookLoadPackage {
 
         Log.e(TAG, "包名匹配(蓝月亮sfa)，开始Hook");
 
-        // 直接在 handleLoadPackage 中初始化并执行 Hook
+        // LSPatch等环境下，currentApplication() 通常能直接获取到 Application
         try {
             Application app = (Application) XposedHelpers.callStaticMethod(
                     XposedHelpers.findClass("android.app.ActivityThread", null),
                     "currentApplication");
             if (app != null) {
                 appContext = app.getApplicationContext();
-                Log.e(TAG, "handleLoadPackage 直接获取到Context");
+                Log.e(TAG, "handleLoadPackage 直接获取到Context: " + appContext);
+                executeHooks(lpparam);
             }
         } catch (Throwable t) {
             Log.e(TAG, "handleLoadPackage 获取Context失败", t);
         }
 
-        // 使用 Application.attach 获取 Context，同时注册 Activity 回调显示悬浮窗
+        // 使用 Application.attach 获取 Context（传统Xposed / 兜底）
         XposedHelpers.findAndHookMethod(Application.class, "attach", Context.class, new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                 appContext = (Context) param.args[0];
-                Log.e(TAG, "获取到Context: " + appContext);
-                loadPrefs();
-                hookAMapLocation(lpparam);
-                hookSystemLocation(lpparam);
-                hookTencentLocation(lpparam);
-                hookCellLocation(lpparam);
-                hookCamera(lpparam);
+                Log.e(TAG, "Application.attach 获取到Context: " + appContext);
+                executeHooks(lpparam);
             }
         });
 
@@ -144,16 +143,11 @@ public class Hook implements IXposedHookLoadPackage {
                     "currentApplication");
             if (app != null && appContext == null) {
                 appContext = app.getApplicationContext();
-                Log.e(TAG, "通过 currentApplication 获取到Context: " + appContext);
-                loadPrefs();
-                hookAMapLocation(lpparam);
-                hookSystemLocation(lpparam);
-                hookTencentLocation(lpparam);
-                hookCellLocation(lpparam);
-                hookCamera(lpparam);
+                Log.e(TAG, "兜底 currentApplication 获取到Context: " + appContext);
+                executeHooks(lpparam);
             }
         } catch (Throwable t) {
-            Log.e(TAG, "currentApplication 获取失败", t);
+            Log.e(TAG, "currentApplication 兜底获取失败", t);
         }
 
         // Hook RNMainActivity.onCreate 注入悬浮窗 + 处理相册返回
@@ -242,6 +236,24 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             Log.e(TAG, "Hook Activity.onActivityResult 失败", t);
         }
+    }
+
+    // ======================== Hook 统一执行入口 ========================
+
+    private void executeHooks(XC_LoadPackage.LoadPackageParam lpparam) {
+        if (hooksExecuted) {
+            Log.e(TAG, "Hooks 已执行过，跳过重复执行");
+            return;
+        }
+        hooksExecuted = true;
+        Log.e(TAG, "开始执行所有 Hooks");
+        loadPrefs();
+        hookAMapLocation(lpparam);
+        hookSystemLocation(lpparam);
+        hookTencentLocation(lpparam);
+        hookCellLocation(lpparam);
+        hookCamera(lpparam);
+        Log.e(TAG, "所有 Hooks 执行完毕");
     }
 
     // ======================== 悬浮窗UI ========================
@@ -1116,7 +1128,7 @@ public class Hook implements IXposedHookLoadPackage {
 
     private void hookAMapLocation(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            ClassLoader cl = appContext.getClassLoader();
+            ClassLoader cl = lpparam.classLoader;
             Class<?> aMapLocationClass = cl.loadClass("com.amap.api.location.AMapLocation");
             XposedHelpers.findAndHookMethod(aMapLocationClass, "getLatitude", new XC_MethodHook() {
                 @Override
