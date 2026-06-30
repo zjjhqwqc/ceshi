@@ -1320,6 +1320,68 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "RegeocodeQuery.getPoint Hook失败: " + t.getMessage());
             }
 
+            // Hook RegeocodeQuery构造函数 - 从源头替换坐标
+            // 这是最上游的hook，RegeocodeQuery创建时就把坐标替换为模拟坐标
+            try {
+                Class<?> regeocodeQueryClass = cl.loadClass("com.amap.api.services.geocoder.RegeocodeQuery");
+                Class<?> latLonPointClass = cl.loadClass("com.amap.api.services.core.LatLonPoint");
+                XposedHelpers.findAndHookConstructor(regeocodeQueryClass, latLonPointClass, float.class, String.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                        if (!sh.getBoolean("locationEnabled", false)) return;
+                        String latStr = sh.getString("lat", "");
+                        String lngStr = sh.getString("lng", "");
+                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
+                        Object point = param.args[0];
+                        if (point != null) {
+                            double origLat = (Double) XposedHelpers.callMethod(point, "getLatitude");
+                            double origLng = (Double) XposedHelpers.callMethod(point, "getLongitude");
+                            // 创建新的模拟坐标点
+                            Object mockPoint = XposedHelpers.newInstance(latLonPointClass,
+                                    Double.parseDouble(latStr), Double.parseDouble(lngStr));
+                            param.args[0] = mockPoint;
+                            Log.e(TAG, "Hook RegeocodeQuery构造函数: 原始坐标 " + origLat + "," + origLng
+                                    + " -> 替换为 " + latStr + "," + lngStr);
+                        }
+                    }
+                });
+                Log.e(TAG, "RegeocodeQuery构造函数 Hook成功 (最上游坐标拦截)");
+            } catch (Throwable t) {
+                Log.e(TAG, "RegeocodeQuery构造函数 Hook失败: " + t.getMessage());
+            }
+
+            // Hook LatLng - 高德地图UI组件使用的坐标类
+            // 地图选点、地图移动等场景都会用到这个类
+            try {
+                Class<?> latLngClass = cl.loadClass("com.amap.api.maps.model.LatLng");
+                // Hook构造函数 - 创建时就替换坐标
+                XposedHelpers.findAndHookConstructor(latLngClass, double.class, double.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                        if (!sh.getBoolean("locationEnabled", false)) return;
+                        String latStr = sh.getString("lat", "");
+                        String lngStr = sh.getString("lng", "");
+                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
+                        // 只在坐标与模拟坐标差异较大时替换（避免无限循环）
+                        double origLat = (Double) param.args[0];
+                        double origLng = (Double) param.args[1];
+                        double mockLat = Double.parseDouble(latStr);
+                        double mockLng = Double.parseDouble(lngStr);
+                        if (Math.abs(origLat - mockLat) > 0.0001 || Math.abs(origLng - mockLng) > 0.0001) {
+                            param.args[0] = mockLat;
+                            param.args[1] = mockLng;
+                            Log.e(TAG, "Hook LatLng构造函数: 原始 " + origLat + "," + origLng
+                                    + " -> 模拟 " + mockLat + "," + mockLng);
+                        }
+                    }
+                });
+                Log.e(TAG, "LatLng构造函数 Hook成功 (地图UI坐标拦截)");
+            } catch (Throwable t) {
+                Log.e(TAG, "LatLng Hook失败: " + t.getMessage());
+            }
+
             // Hook GeocodeSearch.getFromLocation - 同步逆地理编码
             try {
                 Class<?> geocodeSearchClass = cl.loadClass("com.amap.api.services.geocoder.GeocodeSearch");
@@ -1405,6 +1467,7 @@ public class Hook implements IXposedHookLoadPackage {
             }
 
             // Hook getAddress - 返回模拟地址字符串
+            // 关键修复：即使mockAddress为空，也不返回真实地址，而是触发异步逆地理编码
             XposedHelpers.findAndHookMethod(aMapLocationClass, "getAddress", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
@@ -1414,9 +1477,45 @@ public class Hook implements IXposedHookLoadPackage {
                     if (!addr.isEmpty()) {
                         param.setResult(addr);
                         Log.e(TAG, "Hook AMapLocation.getAddress: " + addr);
+                    } else {
+                        // mockAddress为空时，返回空字符串而不是真实地址
+                        // 同时触发异步逆地理编码
+                        param.setResult("");
+                        Log.e(TAG, "Hook AMapLocation.getAddress: mockAddress为空，返回空字符串并触发逆地理编码");
+                        // 触发异步逆地理编码（避免阻塞主线程）
+                        final String latStr = sh.getString("lat", "");
+                        final String lngStr = sh.getString("lng", "");
+                        if (!latStr.isEmpty() && !lngStr.isEmpty()) {
+                            // 使用uiHandler post到主线程触发（reverseGeocodeAsync内部会开子线程）
+                            uiHandler.post(() -> reverseGeocodeAsync());
+                        }
                     }
                 }
             });
+
+            // Hook setAddress - 在SDK设置地址时就替换为模拟地址
+            // 这是上游hook，在地址被写入AMapLocation之前就替换
+            try {
+                XposedHelpers.findAndHookMethod(aMapLocationClass, "setAddress", String.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                        if (!sh.getBoolean("locationEnabled", false)) return;
+                        String mockAddr = sh.getString("mockAddress", "");
+                        if (!mockAddr.isEmpty()) {
+                            String originalAddr = (String) param.args[0];
+                            if (originalAddr != null && !originalAddr.equals(mockAddr)) {
+                                Log.e(TAG, "Hook AMapLocation.setAddress: 原始地址 \"" + originalAddr + "\" -> 模拟地址 \"" + mockAddr + "\"");
+                            }
+                            param.args[0] = mockAddr;
+                        }
+                        // 如果mockAddress为空，允许设置真实地址（但getAddress会返回空字符串）
+                    }
+                });
+                Log.e(TAG, "AMapLocation.setAddress Hook成功 (上游地址拦截)");
+            } catch (Throwable t) {
+                Log.e(TAG, "AMapLocation.setAddress Hook失败: " + t.getMessage());
+            }
 
             // Hook getProvince
             XposedHelpers.findAndHookMethod(aMapLocationClass, "getProvince", new XC_MethodHook() {
@@ -1685,6 +1784,16 @@ public class Hook implements IXposedHookLoadPackage {
                         if (!addr.isEmpty()) {
                             param.setResult(addr);
                             Log.e(TAG, "Hook TencentLocation.getAddress: " + addr);
+                        } else {
+                            // mockAddress为空时，返回空字符串而不是真实地址
+                            param.setResult("");
+                            Log.e(TAG, "Hook TencentLocation.getAddress: mockAddress为空，返回空字符串");
+                            // 触发异步逆地理编码
+                            final String latStr = sh.getString("lat", "");
+                            final String lngStr = sh.getString("lng", "");
+                            if (!latStr.isEmpty() && !lngStr.isEmpty()) {
+                                uiHandler.post(() -> reverseGeocodeAsync());
+                            }
                         }
                     }
                 });
@@ -1796,6 +1905,16 @@ public class Hook implements IXposedHookLoadPackage {
                     if (!addr.isEmpty()) {
                         param.setResult(addr);
                         Log.e(TAG, "Hook LocationResult.getGpsAddress: " + addr);
+                    } else {
+                        // mockAddress为空时，返回空字符串而不是真实地址
+                        param.setResult("");
+                        Log.e(TAG, "Hook LocationResult.getGpsAddress: mockAddress为空，返回空字符串");
+                        // 触发异步逆地理编码
+                        final String latStr = sh.getString("lat", "");
+                        final String lngStr = sh.getString("lng", "");
+                        if (!latStr.isEmpty() && !lngStr.isEmpty()) {
+                            uiHandler.post(() -> reverseGeocodeAsync());
+                        }
                     }
                 }
             });
@@ -1817,6 +1936,16 @@ public class Hook implements IXposedHookLoadPackage {
                     if (!addr.isEmpty()) {
                         param.setResult(addr);
                         Log.e(TAG, "Hook LocationParam.getGpsAddress: " + addr);
+                    } else {
+                        // mockAddress为空时，返回空字符串而不是真实地址
+                        param.setResult("");
+                        Log.e(TAG, "Hook LocationParam.getGpsAddress: mockAddress为空，返回空字符串");
+                        // 触发异步逆地理编码
+                        final String latStr = sh.getString("lat", "");
+                        final String lngStr = sh.getString("lng", "");
+                        if (!latStr.isEmpty() && !lngStr.isEmpty()) {
+                            uiHandler.post(() -> reverseGeocodeAsync());
+                        }
                     }
                 }
             });
@@ -2394,10 +2523,15 @@ public class Hook implements IXposedHookLoadPackage {
         } catch (Exception e) {
             imageRotations.clear();
         }
-        Log.e(TAG, "配置已加载: loc=" + locationEnabled + " cam=" + cameraEnabled);
+        // 加载模拟地址信息到全局变量
+        mockAddress = sh.getString("mockAddress", "");
+        mockProvince = sh.getString("mockProvince", "");
+        mockCity = sh.getString("mockCity", "");
+        mockDistrict = sh.getString("mockDistrict", "");
+        Log.e(TAG, "配置已加载: loc=" + locationEnabled + " cam=" + cameraEnabled
+                + " addr=" + mockAddress);
         // 如果经纬度已设置但地址为空，自动触发逆地理编码
-        String mockAddr = sh.getString("mockAddress", "");
-        if (!customLat.isEmpty() && !customLng.isEmpty() && mockAddr.isEmpty()) {
+        if (!customLat.isEmpty() && !customLng.isEmpty() && mockAddress.isEmpty()) {
             Log.e(TAG, "经纬度已设置但地址为空，自动触发逆地理编码");
             reverseGeocodeAsync();
         }
@@ -2432,17 +2566,31 @@ public class Hook implements IXposedHookLoadPackage {
         }
     }
 
+    // 逆地理编码相关
+    private static volatile boolean isReverseGeocoding = false;
+    private static volatile long lastReverseGeocodeTime = 0;
+
     /**
      * 使用高德地图Web API进行逆地理编码，将虚拟经纬度自动转换为地址
      */
     private void reverseGeocodeAsync() {
         if (appContext == null || customLat.isEmpty() || customLng.isEmpty()) return;
+        // 防重复触发：3秒内不重复请求
+        long now = System.currentTimeMillis();
+        if (isReverseGeocoding || (now - lastReverseGeocodeTime) < 3000) {
+            Log.e(TAG, "逆地理编码跳过（正在进行中或间隔太短）");
+            return;
+        }
+        isReverseGeocoding = true;
+        lastReverseGeocodeTime = now;
+        final String targetLat = customLat;
+        final String targetLng = customLng;
         new Thread(() -> {
             try {
                 // 使用蓝月亮APK中提取的高德key
                 String apiKey = "ed6016242c8f18984ac27a01ec82d241";
                 String urlStr = "https://restapi.amap.com/v3/geocode/regeo?key=" + apiKey
-                        + "&location=" + customLng + "," + customLat
+                        + "&location=" + targetLng + "," + targetLat
                         + "&extensions=all";
                 HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
                 conn.setConnectTimeout(8000);
@@ -2478,6 +2626,7 @@ public class Hook implements IXposedHookLoadPackage {
                                 adcode = addrComp.optString("adcode", "");
                                 citycode = addrComp.optString("citycode", "");
                             }
+                            // 保存到SharedPreferences
                             SharedPreferences.Editor ed = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit();
                             ed.putString("mockAddress", formattedAddress);
                             ed.putString("mockProvince", province);
@@ -2487,6 +2636,11 @@ public class Hook implements IXposedHookLoadPackage {
                             ed.putString("mockAdCode", adcode);
                             ed.putString("mockCityCode", citycode);
                             ed.apply();
+                            // 更新全局变量
+                            mockAddress = formattedAddress;
+                            mockProvince = province;
+                            mockCity = city;
+                            mockDistrict = district;
                             Log.e(TAG, "逆地理编码成功: " + formattedAddress + " [" + province + city + district + "]");
                             uiHandler.post(() -> {
                                 if (appContext != null) {
@@ -2503,6 +2657,8 @@ public class Hook implements IXposedHookLoadPackage {
                 }
             } catch (Exception e) {
                 Log.e(TAG, "逆地理编码异常", e);
+            } finally {
+                isReverseGeocoding = false;
             }
         }).start();
     }
