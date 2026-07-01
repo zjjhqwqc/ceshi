@@ -1311,8 +1311,8 @@ public class Hook implements IXposedHookLoadPackage {
                 }
 
                 // === 虚拟环境检测方法 ===
+                // isInstallVirtual 和 isRunInVirtualApp 返回boolean
                 String[] virtualMethods = {
-                        "checkVirtual",         // 检测虚拟环境（native so检测）
                         "isInstallVirtual",     // 是否安装了虚拟环境
                         "isRunInVirtualApp"     // 是否运行在虚拟App中
                 };
@@ -1327,6 +1327,22 @@ public class Hook implements IXposedHookLoadPackage {
                         });
                     } catch (Throwable ignored) {}
                 }
+
+                // checkVirtual 可能返回int错误码（如-2），单独处理
+                try {
+                    XposedHelpers.findAndHookMethod(securityCheckClass, "checkVirtual", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            if (param.method.getReturnType() == int.class) {
+                                param.setResult(0); // 0表示正常
+                                Log.e(TAG, "Hook SecurityCheckUtil.checkVirtual -> 返回0(正常)");
+                            } else {
+                                param.setResult(false);
+                                Log.e(TAG, "Hook SecurityCheckUtil.checkVirtual -> 返回false");
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {}
 
                 // === 其他检测方法 ===
                 String[] otherMethods = {
@@ -1522,7 +1538,7 @@ public class Hook implements IXposedHookLoadPackage {
             }
 
             // ===== Hook System.loadLibrary 绕过native层检测 =====
-            // 阻止加载检测用的so库
+            // 注意：暂时不阻止so加载，避免APP崩溃，通过Java层hook绕过检测结果
             try {
                 XposedHelpers.findAndHookMethod(System.class, "loadLibrary", String.class, new XC_MethodHook() {
                     @Override
@@ -1533,13 +1549,12 @@ public class Hook implements IXposedHookLoadPackage {
                             if (lowerName.contains("security") || lowerName.contains("check")
                                     || lowerName.contains("anti") || lowerName.contains("detect")
                                     || lowerName.contains("virtual") || lowerName.contains("shield")) {
-                                Log.e(TAG, "拦截so加载: " + libName);
-                                param.setResult(null);
+                                Log.e(TAG, "检测到安全检测so库: " + libName + " (允许加载，通过Java层hook绕过)");
                             }
                         }
                     }
                 });
-                Log.e(TAG, "System.loadLibrary Hook成功 (native检测绕过)");
+                Log.e(TAG, "System.loadLibrary Hook成功 (监测native检测so)");
             } catch (Throwable t) {
                 Log.e(TAG, "System.loadLibrary Hook失败: " + t.getMessage());
             }
