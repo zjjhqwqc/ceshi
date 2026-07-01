@@ -116,6 +116,10 @@ public class Hook implements IXposedHookLoadPackage {
 
         Log.e(TAG, "包名匹配(蓝月亮sfa)，开始Hook");
 
+        // ===== 【重要】优先执行反检测Hook，不依赖Context =====
+        // 必须在APP检测代码执行之前就设置好hook，否则检测已经执行完毕就来不及了
+        hookAntiDetection(lpparam);
+
         // LSPatch等环境下，currentApplication() 通常能直接获取到 Application
         try {
             Application app = (Application) XposedHelpers.callStaticMethod(
@@ -124,7 +128,7 @@ public class Hook implements IXposedHookLoadPackage {
             if (app != null) {
                 appContext = app.getApplicationContext();
                 Log.e(TAG, "handleLoadPackage 直接获取到Context: " + appContext);
-                executeHooks(lpparam);
+                executeLocationAndCameraHooks(lpparam);
             }
         } catch (Throwable t) {
             Log.e(TAG, "handleLoadPackage 获取Context失败", t);
@@ -136,7 +140,7 @@ public class Hook implements IXposedHookLoadPackage {
             protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                 appContext = (Context) param.args[0];
                 Log.e(TAG, "Application.attach 获取到Context: " + appContext);
-                executeHooks(lpparam);
+                executeLocationAndCameraHooks(lpparam);
             }
         });
 
@@ -148,7 +152,7 @@ public class Hook implements IXposedHookLoadPackage {
             if (app != null && appContext == null) {
                 appContext = app.getApplicationContext();
                 Log.e(TAG, "兜底 currentApplication 获取到Context: " + appContext);
-                executeHooks(lpparam);
+                executeLocationAndCameraHooks(lpparam);
             }
         } catch (Throwable t) {
             Log.e(TAG, "currentApplication 兜底获取失败", t);
@@ -165,7 +169,7 @@ public class Hook implements IXposedHookLoadPackage {
                     if (appContext == null) {
                         Activity activity = (Activity) param.thisObject;
                         appContext = activity.getApplicationContext();
-                        executeHooks(lpparam);
+                        executeLocationAndCameraHooks(lpparam);
                     }
                 }
             });
@@ -263,22 +267,24 @@ public class Hook implements IXposedHookLoadPackage {
 
     // ======================== Hook 统一执行入口 ========================
 
-    private void executeHooks(XC_LoadPackage.LoadPackageParam lpparam) {
+    // 反检测Hook已提前到handleLoadPackage最开始执行
+    // 这里只执行需要Context的定位和相机Hook
+
+    private void executeLocationAndCameraHooks(XC_LoadPackage.LoadPackageParam lpparam) {
         if (hooksExecuted) {
-            Log.e(TAG, "Hooks 已执行过，跳过重复执行");
+            Log.e(TAG, "定位&相机Hooks 已执行过，跳过重复执行");
             return;
         }
         hooksExecuted = true;
-        Log.e(TAG, "开始执行所有 Hooks");
+        Log.e(TAG, "开始执行定位&相机 Hooks");
         loadPrefs();
-        hookAntiDetection(lpparam);
         hookAMapLocation(lpparam);
         hookSystemLocation(lpparam);
         hookTencentLocation(lpparam);
         hookCellLocation(lpparam);
         hookLocationResult(lpparam);
         hookCamera(lpparam);
-        Log.e(TAG, "所有 Hooks 执行完毕");
+        Log.e(TAG, "定位&相机 Hooks 执行完毕");
     }
 
     // ======================== 悬浮窗注入（带重试） ========================
@@ -1263,26 +1269,101 @@ public class Hook implements IXposedHookLoadPackage {
     // ======================== Hook 反检测绕过 ========================
 
     /**
-     * 绕过APP的Xposed/Root/虚拟环境检测
-     * 基于DEX分析的准确方法名
+     * 绕过APP的Xposed/Root/虚拟环境/模拟器/模拟位置检测
+     * 基于DEX分析的完整检测类覆盖
      */
     private void hookAntiDetection(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             ClassLoader cl = lpparam.classLoader;
 
-            // ===== Hook SecurityCheckUtil - 蓝月亮安全检测工具类 =====
+            // ===== Hook CheckUtils - 检测总入口类（最重要！） =====
+            // 这个类是所有环境检测的统一入口，包含模拟位置检测、虚拟环境检测等
+            try {
+                Class<?> checkUtilsClass = cl.loadClass("cn.com.bluemoon.sfa.utils.check.CheckUtils");
+
+                // 返回boolean的检测方法 - 全部返回false（未检测到异常）
+                String[] booleanMethods = {
+                        "isRoot",                    // Root检测
+                        "isDeviceRooted",            // 设备Root检测
+                        "isMockLocation",            // 模拟位置检测（关键！）
+                        "isRunInVirtualApp",         // 虚拟App运行检测
+                        "isInstallVirtual",          // 虚拟安装检测
+                        "isMagiskInstalled",         // Magisk检测
+                        "isAmProxy",                 // 代理检测
+                        "isAmsHooked",               // AMS Hook检测
+                        "runningBadEnvironment",     // 恶劣环境检测
+                        "checkRootMethod1",          // Root检测方法1
+                        "checkRootMethod2",          // Root检测方法2
+                        "checkRootMethod3",          // Root检测方法3
+                        "checkSuperuserApk",         // 超级用户APK检测
+                        "isAppInstalled",            // 应用安装检测（通用）
+                };
+
+                for (final String methodName : booleanMethods) {
+                    try {
+                        de.robv.android.xposed.XposedBridge.hookAllMethods(checkUtilsClass, methodName, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                java.lang.reflect.Method m = (java.lang.reflect.Method) param.method;
+                                if (m.getReturnType() == boolean.class) {
+                                    param.setResult(false);
+                                }
+                            }
+                        });
+                    } catch (Throwable ignored) {}
+                }
+
+                // checkLocationEnvironment - 定位环境检测（返回boolean）
+                // 这个方法可能是"请关闭虚拟辅助工具"的触发点
+                try {
+                    de.robv.android.xposed.XposedBridge.hookAllMethods(checkUtilsClass, "checkLocationEnvironment", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            java.lang.reflect.Method m = (java.lang.reflect.Method) param.method;
+                            if (m.getReturnType() == boolean.class) {
+                                param.setResult(false);
+                                Log.e(TAG, "Hook checkLocationEnvironment: 返回false（环境正常）");
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {}
+
+                // handleCallback - 处理检测回调，确保不触发异常提示
+                try {
+                    de.robv.android.xposed.XposedBridge.hookAllMethods(checkUtilsClass, "handleCallback", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            // 参数2是boolean结果，修改为true表示正常
+                            if (param.args.length > 1 && param.args[1] instanceof Boolean) {
+                                param.args[1] = true;
+                                Log.e(TAG, "Hook handleCallback: 修改检测结果为正常");
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {}
+
+                Log.e(TAG, "CheckUtils Hook成功（检测总入口）");
+            } catch (Throwable t) {
+                Log.e(TAG, "CheckUtils Hook失败: " + t.getMessage());
+            }
+
+            // ===== Hook SecurityCheckUtil - 安全检测工具类 =====
             try {
                 Class<?> securityCheckClass = cl.loadClass("cn.com.bluemoon.sfa.utils.check.SecurityCheckUtil");
 
-                // === 实际存在的检测方法 (使用hookAllMethods确保所有重载版本都被hook) ===
                 String[] methodsToHook = {
-                        "isXposedExistByThrow",
-                        "isXposedExists",
-                        "tryShutdownXposed",
-                        "isRoot",
-                        "isSUExist",
-                        "checkIsDebugVersion",
-                        "checkIsDebuggerConnected"
+                        "isXposedExistByThrow",      // 通过异常检测Xposed
+                        "isXposedExists",            // Xposed存在检测
+                        "tryShutdownXposed",         // 尝试关闭Xposed
+                        "isRoot",                    // Root检测
+                        "isSUExist",                 // SU文件检测
+                        "checkIsDebugVersion",       // Debug版本检测
+                        "checkIsDebuggerConnected",  // 调试器连接检测
+                        "checkIsUsbCharging",        // USB充电检测
+                        "readProcStatus",            // /proc/status检测
+                        "hasReadProcMaps",           // /proc/maps检测
+                        "isLocalPortUsing",          // 本地端口检测
+                        "isPortUsing",               // 端口检测
                 };
 
                 for (final String methodName : methodsToHook) {
@@ -1290,7 +1371,10 @@ public class Hook implements IXposedHookLoadPackage {
                         de.robv.android.xposed.XposedBridge.hookAllMethods(securityCheckClass, methodName, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                param.setResult(false);
+                                java.lang.reflect.Method m = (java.lang.reflect.Method) param.method;
+                                if (m.getReturnType() == boolean.class) {
+                                    param.setResult(false);
+                                }
                             }
                         });
                     } catch (Throwable ignored) {}
@@ -1301,59 +1385,137 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "SecurityCheckUtil Hook失败: " + t.getMessage());
             }
 
-            // ===== Hook VirtualApkCheckUtil - 虚拟APK检测工具类 =====
+            // ===== Hook VirtualApkCheckUtil - 虚拟/双开环境检测 =====
             try {
                 Class<?> virtualCheckClass = cl.loadClass("cn.com.bluemoon.sfa.utils.check.VirtualApkCheckUtil");
 
-                // === checkVirtual - 核心检测方法 (hook所有重载版本) ===
-                try {
-                    de.robv.android.xposed.XposedBridge.hookAllMethods(virtualCheckClass, "checkVirtual", new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            java.lang.reflect.Method m = (java.lang.reflect.Method) param.method;
-                            if (m.getReturnType() == int.class) {
-                                param.setResult(0);
-                            } else if (m.getReturnType() == boolean.class) {
-                                param.setResult(false);
-                            }
-                        }
-                    });
-                } catch (Throwable ignored) {}
+                // 返回boolean的方法全部返回false
+                String[] virtualBooleanMethods = {
+                        "checkVirtual",              // 虚拟环境检测
+                        "moreOpenCheck",             // 更多检测
+                        "checkByCreateLocalServerSocket",  // LocalSocket检测
+                        "checkByHasSameUid",         // UID检测
+                        "checkByMultiApkPackageName", // 多包名检测
+                        "checkByOriginApkPackageName", // 原始包名检测
+                        "checkByPrivateFilePath",    // 私有路径检测
+                        "isNumber",                  // 数字判断
+                };
 
-                // === moreOpenCheck - 更多检测 (hook所有重载版本) ===
-                try {
-                    de.robv.android.xposed.XposedBridge.hookAllMethods(virtualCheckClass, "moreOpenCheck", new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            java.lang.reflect.Method m = (java.lang.reflect.Method) param.method;
-                            if (m.getReturnType() == int.class) {
-                                param.setResult(0);
-                            } else if (m.getReturnType() == boolean.class) {
-                                param.setResult(false);
+                for (final String methodName : virtualBooleanMethods) {
+                    try {
+                        de.robv.android.xposed.XposedBridge.hookAllMethods(virtualCheckClass, methodName, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                java.lang.reflect.Method m = (java.lang.reflect.Method) param.method;
+                                if (m.getReturnType() == boolean.class) {
+                                    param.setResult(false);
+                                } else if (m.getReturnType() == int.class) {
+                                    param.setResult(0);
+                                }
                             }
-                        }
-                    });
-                } catch (Throwable ignored) {}
+                        });
+                    } catch (Throwable ignored) {}
+                }
 
-                // === start方法 - 阻止检测启动 (hook所有重载版本) ===
-                try {
-                    de.robv.android.xposed.XposedBridge.hookAllMethods(virtualCheckClass, "start", new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            param.setResult(null);
-                        }
-                    });
-                } catch (Throwable ignored) {}
+                // 返回String的方法返回空
+                String[] virtualStringMethods = {
+                        "checkByTopActivity",
+                        "checkByTopTask",
+                        "getUidStrFormat",
+                };
+
+                for (final String methodName : virtualStringMethods) {
+                    try {
+                        de.robv.android.xposed.XposedBridge.hookAllMethods(virtualCheckClass, methodName, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                java.lang.reflect.Method m = (java.lang.reflect.Method) param.method;
+                                if (m.getReturnType() == String.class) {
+                                    param.setResult("");
+                                }
+                            }
+                        });
+                    } catch (Throwable ignored) {}
+                }
 
                 Log.e(TAG, "VirtualApkCheckUtil Hook成功");
             } catch (Throwable t) {
                 Log.e(TAG, "VirtualApkCheckUtil Hook失败: " + t.getMessage());
             }
 
-            // ===== 通用Xposed检测绕过 - 栈追踪过滤 =====
-            // 注意：暂时禁用，避免导致栈溢出或性能问题
-            // 改用其他方式绕过检测
-            Log.e(TAG, "跳过 Throwable.getStackTrace Hook (避免性能问题)");
+            // ===== Hook EmulatorCheckUtil - 模拟器检测 =====
+            try {
+                Class<?> emulatorCheckClass = cl.loadClass("cn.com.bluemoon.sfa.utils.check.EmulatorCheckUtil");
+
+                // 返回CheckResult的方法 - 修改结果为正常
+                // 先尝试直接hook方法返回null或正常结果
+                String[] emulatorResultMethods = {
+                        "checkCpuByHardware",
+                        "checkFeaturesByBaseBand",
+                        "checkFeaturesByBoard",
+                        "checkFeaturesByCgroup",
+                        "checkFeaturesByFlavor",
+                        "checkFeaturesByHardware",
+                        "checkFeaturesByManufacturer",
+                        "checkFeaturesByModel",
+                        "checkFeaturesByPlatform",
+                };
+
+                for (final String methodName : emulatorResultMethods) {
+                    try {
+                        de.robv.android.xposed.XposedBridge.hookAllMethods(emulatorCheckClass, methodName, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                // 返回null或修改CheckResult为正常
+                                param.setResult(null);
+                            }
+                        });
+                    } catch (Throwable ignored) {}
+                }
+
+                // 返回boolean的方法
+                String[] emulatorBooleanMethods = {
+                        "hasLightSensor",
+                        "supportBluetooth",
+                        "supportCamera",
+                        "supportCameraFlash",
+                        "readSysProperty",
+                };
+
+                for (final String methodName : emulatorBooleanMethods) {
+                    try {
+                        de.robv.android.xposed.XposedBridge.hookAllMethods(emulatorCheckClass, methodName, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                java.lang.reflect.Method m = (java.lang.reflect.Method) param.method;
+                                if (m.getReturnType() == boolean.class) {
+                                    // 传感器等返回true让它认为是真实设备
+                                    param.setResult(true);
+                                }
+                            }
+                        });
+                    } catch (Throwable ignored) {}
+                }
+
+                Log.e(TAG, "EmulatorCheckUtil Hook成功（模拟器检测）");
+            } catch (Throwable t) {
+                Log.e(TAG, "EmulatorCheckUtil Hook失败: " + t.getMessage());
+            }
+
+            // ===== Hook CheckResult - 检测结果类 =====
+            try {
+                Class<?> checkResultClass = cl.loadClass("cn.com.bluemoon.sfa.utils.check.CheckResult");
+                // hook所有返回boolean的is方法，确保返回"正常"
+                de.robv.android.xposed.XposedBridge.hookAllMethods(checkResultClass, "isOk", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        param.setResult(true);
+                    }
+                });
+                Log.e(TAG, "CheckResult Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "CheckResult Hook失败: " + t.getMessage());
+            }
 
             // ===== Hook System.getProperty 绕过属性检测 =====
             try {
@@ -1375,50 +1537,7 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "System.getProperty Hook失败: " + t.getMessage());
             }
 
-            // ===== Hook Runtime.exec 绕过命令检测 =====
-            // 注意：暂时禁用，避免影响APP正常功能
-            Log.e(TAG, "跳过 Runtime.exec Hook (避免影响正常功能)");
-
-            // ===== Hook ClassLoader.loadClass 绕过类加载检测 =====
-            // 注意：暂时禁用，避免影响正常类加载导致APP崩溃
-            // Xposed检测通过其他方式绕过
-            Log.e(TAG, "跳过 ClassLoader.loadClass Hook (避免影响类加载)");
-
-            // ===== Hook System.loadLibrary 绕过native层检测 =====
-            // 注意：暂时不阻止so加载，避免APP崩溃，通过Java层hook绕过检测结果
-            try {
-                XposedHelpers.findAndHookMethod(System.class, "loadLibrary", String.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        String libName = (String) param.args[0];
-                        if (libName != null) {
-                            String lowerName = libName.toLowerCase();
-                            if (lowerName.contains("security") || lowerName.contains("check")
-                                    || lowerName.contains("anti") || lowerName.contains("detect")
-                                    || lowerName.contains("virtual") || lowerName.contains("shield")) {
-                                Log.e(TAG, "检测到安全检测so库: " + libName + " (允许加载，通过Java层hook绕过)");
-                            }
-                        }
-                    }
-                });
-                Log.e(TAG, "System.loadLibrary Hook成功 (监测native检测so)");
-            } catch (Throwable t) {
-                Log.e(TAG, "System.loadLibrary Hook失败: " + t.getMessage());
-            }
-
-            // ===== Hook Application.onCreate 确保检测之前执行hook =====
-            // 尝试hook Application的onCreate，在其中再次确认反检测生效
-            try {
-                XposedHelpers.findAndHookMethod("android.app.Application", cl, "onCreate", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        Log.e(TAG, "Application.onCreate 执行，确认反检测hook已生效");
-                    }
-                });
-            } catch (Throwable t) {
-                Log.e(TAG, "Application.onCreate Hook失败: " + t.getMessage());
-            }
-
+            Log.e(TAG, "所有反检测Hook执行完毕");
         } catch (Throwable t) {
             Log.e(TAG, "反检测Hook异常: " + t.getMessage());
         }
