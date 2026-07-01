@@ -1537,37 +1537,75 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "System.getProperty Hook失败: " + t.getMessage());
             }
 
-            // ===== Hook GDLocationUtil - 蓝月亮高德定位工具类（关键！） =====
-            // 设置notCheckMock标志，让APP跳过模拟位置检测
+            // ===== Hook GDLocationUtil - 蓝月亮高德定位工具类（最关键！） =====
+            // notCheckMock 是 GDLocationUtil$Companion 的实例字段，不是静态字段
             try {
+                Class<?> companionClass = cl.loadClass("cn.com.bluemoon.sfa.utils.location.GDLocationUtil$Companion");
                 Class<?> gdLocationUtilClass = cl.loadClass("cn.com.bluemoon.sfa.utils.location.GDLocationUtil");
 
-                // 【最重要】直接在类加载时就设置notCheckMock为true
-                // 这样APP一开始就不会进行模拟位置检测
+                // 【最重要】获取Companion实例并设置notCheckMock为true
+                // Kotlin的companion object是通过静态字段Companion访问的
                 try {
-                    XposedHelpers.setStaticObjectField(gdLocationUtilClass, "notCheckMock",
-                            new java.util.concurrent.atomic.AtomicBoolean(true));
-                    Log.e(TAG, "GDLocationUtil.notCheckMock 直接设置为true（最早期绕过）");
+                    Object companionInstance = XposedHelpers.getStaticObjectField(gdLocationUtilClass, "Companion");
+                    if (companionInstance != null) {
+                        XposedHelpers.setObjectField(companionInstance, "notCheckMock",
+                                new java.util.concurrent.atomic.AtomicBoolean(true));
+                        Log.e(TAG, "GDLocationUtil.Companion.notCheckMock 设置为true（成功！）");
+                    } else {
+                        Log.e(TAG, "GDLocationUtil.Companion 实例为null");
+                    }
                 } catch (Throwable t) {
-                    Log.e(TAG, "设置notCheckMock失败: " + t.getMessage());
+                    Log.e(TAG, "设置Companion.notCheckMock失败: " + t.getMessage());
                 }
 
-                // hook checkMockSync方法，双重保险
+                // hook Companion.checkMockSync方法，双重保险
+                try {
+                    de.robv.android.xposed.XposedBridge.hookAllMethods(companionClass, "checkMockSync", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            // 每次调用都重新设置notCheckMock
+                            try {
+                                XposedHelpers.setObjectField(param.thisObject, "notCheckMock",
+                                        new java.util.concurrent.atomic.AtomicBoolean(true));
+                            } catch (Throwable ignored) {}
+                            param.setResult(null);
+                            Log.e(TAG, "Hook Companion.checkMockSync: 阻止检测执行");
+                        }
+                    });
+                    Log.e(TAG, "GDLocationUtil$Companion.checkMockSync Hook成功");
+                } catch (Throwable t) {
+                    Log.e(TAG, "Companion.checkMockSync Hook失败: " + t.getMessage());
+                }
+
+                // 同时也hook GDLocationUtil类上的checkMockSync（可能是静态转发方法）
                 try {
                     de.robv.android.xposed.XposedBridge.hookAllMethods(gdLocationUtilClass, "checkMockSync", new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            try {
-                                XposedHelpers.setStaticObjectField(gdLocationUtilClass, "notCheckMock",
-                                        new java.util.concurrent.atomic.AtomicBoolean(true));
-                            } catch (Throwable ignored) {}
                             param.setResult(null);
-                            Log.e(TAG, "Hook checkMockSync: 阻止检测执行");
+                            Log.e(TAG, "Hook GDLocationUtil.checkMockSync: 阻止检测执行");
                         }
                     });
                     Log.e(TAG, "GDLocationUtil.checkMockSync Hook成功");
                 } catch (Throwable t) {
                     Log.e(TAG, "GDLocationUtil.checkMockSync Hook失败: " + t.getMessage());
+                }
+
+                // hook startLocate方法，在每次定位前都设置notCheckMock（三重保险）
+                try {
+                    de.robv.android.xposed.XposedBridge.hookAllMethods(companionClass, "startLocate", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                XposedHelpers.setObjectField(param.thisObject, "notCheckMock",
+                                        new java.util.concurrent.atomic.AtomicBoolean(true));
+                                Log.e(TAG, "Hook startLocate: 设置notCheckMock=true");
+                            } catch (Throwable ignored) {}
+                        }
+                    });
+                    Log.e(TAG, "GDLocationUtil$Companion.startLocate Hook成功");
+                } catch (Throwable t) {
+                    Log.e(TAG, "startLocate Hook失败: " + t.getMessage());
                 }
             } catch (Throwable t) {
                 Log.e(TAG, "GDLocationUtil Hook失败: " + t.getMessage());
