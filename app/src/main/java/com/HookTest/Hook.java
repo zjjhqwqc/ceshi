@@ -1264,6 +1264,7 @@ public class Hook implements IXposedHookLoadPackage {
 
     /**
      * 绕过APP的Xposed/Root/虚拟环境检测
+     * 基于DEX分析的准确方法名
      */
     private void hookAntiDetection(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
@@ -1273,16 +1274,13 @@ public class Hook implements IXposedHookLoadPackage {
             try {
                 Class<?> securityCheckClass = cl.loadClass("cn.com.bluemoon.sfa.utils.check.SecurityCheckUtil");
 
-                // Hook所有可能的检测方法，返回安全结果
-                String[] checkMethods = {
-                        "isXposedExist", "isXposedExists", "isXposedExistByThrow",
-                        "isRoot", "isRootExist", "isRooted",
-                        "isVirtual", "isVirtualExist", "isVirtualApp",
-                        "isHook", "isHookExist",
-                        "isEmulator", "isEmulatorExist"
+                // === Xposed检测方法 ===
+                String[] xposedMethods = {
+                        "isXposedExistByThrow",   // 通过抛出异常检测Xposed
+                        "isXposedExists",         // 检测Xposed是否存在
+                        "tryShutdownXposed"       // 尝试关闭Xposed
                 };
-
-                for (String methodName : checkMethods) {
+                for (String methodName : xposedMethods) {
                     try {
                         XposedHelpers.findAndHookMethod(securityCheckClass, methodName, new XC_MethodHook() {
                             @Override
@@ -1294,22 +1292,95 @@ public class Hook implements IXposedHookLoadPackage {
                     } catch (Throwable ignored) {}
                 }
 
-                // Hook 整体检测方法
-                String[] envCheckMethods = {
-                        "checkEnv", "checkSecurity", "check", "isSafe",
-                        "isEnvironmentSafe", "checkVirtual", "checkXposed", "checkRoot"
+                // === Root检测方法 ===
+                String[] rootMethods = {
+                        "checkRootMethod1", "checkRootMethod2", "checkRootMethod3",
+                        "isRoot", "isRooted", "isDeviceRooted", "isRootEnv",
+                        "getIsRooted", "initRooted"
                 };
-                for (String methodName : envCheckMethods) {
+                for (String methodName : rootMethods) {
                     try {
                         XposedHelpers.findAndHookMethod(securityCheckClass, methodName, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                param.setResult(true); // 返回安全
-                                Log.e(TAG, "Hook SecurityCheckUtil." + param.method.getName() + " -> 返回true(安全)");
+                                param.setResult(false);
+                                Log.e(TAG, "Hook SecurityCheckUtil." + param.method.getName() + " -> 返回false");
                             }
                         });
                     } catch (Throwable ignored) {}
                 }
+
+                // === 虚拟环境检测方法 ===
+                String[] virtualMethods = {
+                        "checkVirtual",         // 检测虚拟环境（native so检测）
+                        "isInstallVirtual",     // 是否安装了虚拟环境
+                        "isRunInVirtualApp"     // 是否运行在虚拟App中
+                };
+                for (String methodName : virtualMethods) {
+                    try {
+                        XposedHelpers.findAndHookMethod(securityCheckClass, methodName, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                param.setResult(false);
+                                Log.e(TAG, "Hook SecurityCheckUtil." + param.method.getName() + " -> 返回false");
+                            }
+                        });
+                    } catch (Throwable ignored) {}
+                }
+
+                // === 其他检测方法 ===
+                String[] otherMethods = {
+                        "isAmsHooked",          // 检测AMS是否被hook
+                        "isDebugEnv",           // 检测调试环境
+                        "isAmpEnv", "isInAmpEnv",
+                        "isSafeEntryName",
+                        "checkLocationEnvironment"  // 检测定位环境
+                };
+                for (String methodName : otherMethods) {
+                    try {
+                        XposedHelpers.findAndHookMethod(securityCheckClass, methodName, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                if (param.method.getReturnType() == boolean.class) {
+                                    param.setResult(false);
+                                }
+                                Log.e(TAG, "Hook SecurityCheckUtil." + param.method.getName());
+                            }
+                        });
+                    } catch (Throwable ignored) {}
+                }
+
+                // Hook初始化方法，确保检测不被触发
+                try {
+                    XposedHelpers.findAndHookMethod(securityCheckClass, "initSecurityCheck", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            Log.e(TAG, "Hook SecurityCheckUtil.initSecurityCheck -> 跳过初始化");
+                            param.setResult(null);
+                        }
+                    });
+                } catch (Throwable ignored) {}
+
+                // Hook getAppRunEnvironment - 返回环境检测结果（可能返回错误码-2）
+                try {
+                    XposedHelpers.findAndHookMethod(securityCheckClass, "getAppRunEnvironment", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            Log.e(TAG, "Hook SecurityCheckUtil.getAppRunEnvironment -> 返回0(正常环境)");
+                            param.setResult(0); // 0表示正常环境
+                        }
+                    });
+                } catch (Throwable ignored) {}
+
+                // Hook getAppRunEnvironmentTest - 测试方法
+                try {
+                    XposedHelpers.findAndHookMethod(securityCheckClass, "getAppRunEnvironmentTest", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            param.setResult(0);
+                        }
+                    });
+                } catch (Throwable ignored) {}
 
                 Log.e(TAG, "SecurityCheckUtil Hook成功 (反检测绕过)");
             } catch (Throwable t) {
@@ -1320,13 +1391,13 @@ public class Hook implements IXposedHookLoadPackage {
             try {
                 Class<?> virtualCheckClass = cl.loadClass("cn.com.bluemoon.sfa.utils.check.VirtualApkCheckUtil");
 
-                // Hook检测方法，返回安全
-                String[] virtualMethods = {
-                        "isVirtualApk", "checkVirtualApk", "isVirtual",
-                        "isRunningInVirtual", "isVirtualEnvironment"
+                // Hook所有检测方法
+                String[] virtualApkMethods = {
+                        "isVirtualApk", "checkVirtualApk",
+                        "isVirtual", "isRunningInVirtual", "isVirtualEnvironment"
                 };
 
-                for (String methodName : virtualMethods) {
+                for (String methodName : virtualApkMethods) {
                     try {
                         XposedHelpers.findAndHookMethod(virtualCheckClass, methodName, new XC_MethodHook() {
                             @Override
@@ -1343,8 +1414,7 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "VirtualApkCheckUtil Hook失败: " + t.getMessage());
             }
 
-            // ===== 通用Xposed检测绕过 =====
-            // Hook XposedHelpers类的方法调用检测（通过栈追踪检测Xposed）
+            // ===== 通用Xposed检测绕过 - 栈追踪过滤 =====
             try {
                 XposedHelpers.findAndHookMethod(Throwable.class, "getStackTrace", new XC_MethodHook() {
                     @Override
@@ -1352,14 +1422,14 @@ public class Hook implements IXposedHookLoadPackage {
                         StackTraceElement[] stack = (StackTraceElement[]) param.getResult();
                         if (stack == null) return;
 
-                        // 过滤掉Xposed相关的栈帧
                         java.util.List<StackTraceElement> filtered = new java.util.ArrayList<>();
                         boolean modified = false;
                         for (StackTraceElement elem : stack) {
                             String className = elem.getClassName();
                             if (className.contains("xposed") || className.contains("Xposed")
                                     || className.contains("lsposed") || className.contains("LSPosed")
-                                    || className.contains("HookTest") || className.contains("HookTest")) {
+                                    || className.contains("HookTest")
+                                    || className.contains("de.robv.android.xposed")) {
                                 modified = true;
                                 continue;
                             }
@@ -1375,35 +1445,39 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "Throwable.getStackTrace Hook失败: " + t.getMessage());
             }
 
-            // ===== Hook System.getProperty 绕过检测 =====
-            // 某些检测通过系统属性判断
+            // ===== Hook System.getProperty 绕过属性检测 =====
             try {
                 XposedHelpers.findAndHookMethod(System.class, "getProperty", String.class, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         String key = (String) param.args[0];
-                        if (key != null && (key.contains("xposed") || key.contains("Xposed"))) {
-                            param.setResult(null);
+                        if (key != null) {
+                            String lowerKey = key.toLowerCase();
+                            if (lowerKey.contains("xposed") || lowerKey.contains("magisk")
+                                    || lowerKey.contains("lsposed")) {
+                                param.setResult(null);
+                            }
                         }
                     }
                 });
-                Log.e(TAG, "System.getProperty Hook成功 (Xposed属性绕过)");
+                Log.e(TAG, "System.getProperty Hook成功");
             } catch (Throwable t) {
                 Log.e(TAG, "System.getProperty Hook失败: " + t.getMessage());
             }
 
-            // ===== Hook Runtime.exec 绕过检测 =====
-            // 某些检测通过执行命令判断（如su、which等）
+            // ===== Hook Runtime.exec 绕过命令检测 =====
             try {
                 XposedHelpers.findAndHookMethod(Runtime.class, "exec", String.class, new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         String cmd = (String) param.args[0];
-                        if (cmd != null && (cmd.contains("su") || cmd.contains("magisk")
-                                || cmd.contains("xposed") || cmd.contains("busybox"))) {
-                            // 抛出异常，模拟命令不存在
-                            param.setThrowable(new java.io.IOException());
-                            Log.e(TAG, "Hook Runtime.exec: 拦截命令 " + cmd);
+                        if (cmd != null) {
+                            String lowerCmd = cmd.toLowerCase();
+                            if (lowerCmd.contains("su") || lowerCmd.contains("magisk")
+                                    || lowerCmd.contains("busybox") || lowerCmd.contains("xposed")) {
+                                param.setThrowable(new java.io.IOException());
+                                Log.e(TAG, "Hook Runtime.exec: 拦截命令 " + cmd);
+                            }
                         }
                     }
                 });
@@ -1412,29 +1486,75 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "Runtime.exec Hook失败: " + t.getMessage());
             }
 
-            // ===== Hook File.exists 绕过文件检测 =====
-            // 某些检测通过检查特定文件是否存在判断
+            // ===== Hook ClassLoader.loadClass 绕过类加载检测 =====
+            // 检测Xposed的常用方法是尝试加载Xposed相关类
             try {
-                XposedHelpers.findAndHookMethod("java.io.File", cl, "exists", new XC_MethodHook() {
+                XposedHelpers.findAndHookMethod(ClassLoader.class, "loadClass", String.class, new XC_MethodHook() {
                     @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        String path = (String) XposedHelpers.callMethod(param.thisObject, "getPath");
-                        if (path != null) {
-                            String lowerPath = path.toLowerCase();
-                            if (lowerPath.contains("xposed")
-                                    || lowerPath.contains("lsposed")
-                                    || lowerPath.contains("magisk")
-                                    || lowerPath.contains("edxposed")
-                                    || lowerPath.contains("taichi")
-                                    || lowerPath.contains("virtualxposed")) {
-                                param.setResult(false);
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        String className = (String) param.args[0];
+                        if (className != null) {
+                            String lowerName = className.toLowerCase();
+                            if (lowerName.contains("de.robv.android.xposed")
+                                    || lowerName.contains("lsposed")
+                                    || lowerName.contains("xposed")
+                                    || lowerName.contains("com.lody.virtual")) {
+                                // 只有当调用者是安全检测类时才拦截
+                                Throwable th = new Throwable();
+                                StackTraceElement[] stack = th.getStackTrace();
+                                for (StackTraceElement elem : stack) {
+                                    String caller = elem.getClassName();
+                                    if (caller.contains("SecurityCheckUtil")
+                                            || caller.contains("VirtualApkCheckUtil")
+                                            || caller.contains("check")) {
+                                        Log.e(TAG, "拦截Xposed类加载检测: " + className);
+                                        param.setThrowable(new ClassNotFoundException(className));
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }
                 });
-                Log.e(TAG, "File.exists Hook成功 (文件检测绕过)");
+                Log.e(TAG, "ClassLoader.loadClass Hook成功 (类加载检测绕过)");
             } catch (Throwable t) {
-                Log.e(TAG, "File.exists Hook失败: " + t.getMessage());
+                Log.e(TAG, "ClassLoader.loadClass Hook失败: " + t.getMessage());
+            }
+
+            // ===== Hook System.loadLibrary 绕过native层检测 =====
+            // 阻止加载检测用的so库
+            try {
+                XposedHelpers.findAndHookMethod(System.class, "loadLibrary", String.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        String libName = (String) param.args[0];
+                        if (libName != null) {
+                            String lowerName = libName.toLowerCase();
+                            if (lowerName.contains("security") || lowerName.contains("check")
+                                    || lowerName.contains("anti") || lowerName.contains("detect")
+                                    || lowerName.contains("virtual") || lowerName.contains("shield")) {
+                                Log.e(TAG, "拦截so加载: " + libName);
+                                param.setResult(null);
+                            }
+                        }
+                    }
+                });
+                Log.e(TAG, "System.loadLibrary Hook成功 (native检测绕过)");
+            } catch (Throwable t) {
+                Log.e(TAG, "System.loadLibrary Hook失败: " + t.getMessage());
+            }
+
+            // ===== Hook Application.onCreate 确保检测之前执行hook =====
+            // 尝试hook Application的onCreate，在其中再次确认反检测生效
+            try {
+                XposedHelpers.findAndHookMethod("android.app.Application", cl, "onCreate", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        Log.e(TAG, "Application.onCreate 执行，确认反检测hook已生效");
+                    }
+                });
+            } catch (Throwable t) {
+                Log.e(TAG, "Application.onCreate Hook失败: " + t.getMessage());
             }
 
         } catch (Throwable t) {
