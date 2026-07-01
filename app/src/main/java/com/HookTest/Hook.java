@@ -1333,7 +1333,8 @@ public class Hook implements IXposedHookLoadPackage {
                     XposedHelpers.findAndHookMethod(securityCheckClass, "checkVirtual", new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            if (param.method.getReturnType() == int.class) {
+                            java.lang.reflect.Method m = (java.lang.reflect.Method) param.method;
+                            if (m.getReturnType() == int.class) {
                                 param.setResult(0); // 0表示正常
                                 Log.e(TAG, "Hook SecurityCheckUtil.checkVirtual -> 返回0(正常)");
                             } else {
@@ -1357,7 +1358,8 @@ public class Hook implements IXposedHookLoadPackage {
                         XposedHelpers.findAndHookMethod(securityCheckClass, methodName, new XC_MethodHook() {
                             @Override
                             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                if (param.method.getReturnType() == boolean.class) {
+                                java.lang.reflect.Method m = (java.lang.reflect.Method) param.method;
+                                if (m.getReturnType() == boolean.class) {
                                     param.setResult(false);
                                 }
                                 Log.e(TAG, "Hook SecurityCheckUtil." + param.method.getName());
