@@ -278,11 +278,7 @@ public class Hook implements IXposedHookLoadPackage {
         hooksExecuted = true;
         Log.e(TAG, "开始执行定位&相机 Hooks");
         loadPrefs();
-        hookAMapLocation(lpparam);
         hookSystemLocation(lpparam);
-        hookTencentLocation(lpparam);
-        hookCellLocation(lpparam);
-        hookLocationResult(lpparam);
         hookCamera(lpparam);
         Log.e(TAG, "定位&相机 Hooks 执行完毕");
     }
@@ -1687,558 +1683,24 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     // ======================== Hook 定位 ========================
+    // ======================== Hook 定位（最源头方案） ========================
 
-    private void hookAMapLocation(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            ClassLoader cl = lpparam.classLoader;
-            Class<?> aMapLocationClass = cl.loadClass("com.amap.api.location.AMapLocation");
-
-            // ====== 【重要】绕过高德SDK模拟位置检测 ======
-            // Hook AMapLocation.isMock() - 返回false表示不是模拟位置
-            try {
-                XposedHelpers.findAndHookMethod(aMapLocationClass, "isMock", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        param.setResult(false);
-                    }
-                });
-                Log.e(TAG, "AMapLocation.isMock Hook成功（绕过模拟位置检测）");
-            } catch (Throwable t) {
-                Log.e(TAG, "AMapLocation.isMock Hook失败: " + t.getMessage());
-            }
-
-            // Hook AMapLocationQualityReport.isInstalledHighDangerMockApp() - 高危模拟应用检测
-            try {
-                Class<?> qualityReportClass = cl.loadClass("com.amap.api.location.AMapLocationQualityReport");
-                XposedHelpers.findAndHookMethod(qualityReportClass, "isInstalledHighDangerMockApp", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        param.setResult(false);
-                    }
-                });
-                Log.e(TAG, "AMapLocationQualityReport.isInstalledHighDangerMockApp Hook成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "AMapLocationQualityReport Hook失败: " + t.getMessage());
-            }
-
-            // Hook AMapLocationClientOption.setMockEnable - 阻止启用模拟位置
-            try {
-                Class<?> optionClass = cl.loadClass("com.amap.api.location.AMapLocationClientOption");
-                XposedHelpers.findAndHookMethod(optionClass, "setMockEnable", boolean.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        param.args[0] = false;
-                    }
-                });
-                Log.e(TAG, "AMapLocationClientOption.setMockEnable Hook成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "AMapLocationClientOption.setMockEnable Hook失败: " + t.getMessage());
-            }
-
-            // ====== 【最上游】Hook高德定位回调接口 - 在定位结果返回时就替换坐标并清除mock标记 ======
-            // 这是最关键的hook点：所有定位结果（包括checkMockSync的检测定位）都会经过这里
-            // 我们在回调的最上游就把坐标替换成模拟坐标，并设置isMock=false
-            try {
-                Class<?> listenerClass = cl.loadClass("com.amap.api.location.AMapLocationListener");
-                // hook AMapLocationClient.setLocationListener - 拦截监听器设置
-                try {
-                    Class<?> clientClass = cl.loadClass("com.amap.api.location.AMapLocationClient");
-                    XposedHelpers.findAndHookMethod(clientClass, "setLocationListener",
-                            listenerClass, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            final Object originalListener = param.args[0];
-                            if (originalListener == null) return;
-
-                            // 创建一个代理监听器，在回调前替换坐标
-                            Object proxyListener = java.lang.reflect.Proxy.newProxyInstance(
-                                    listenerClass.getClassLoader(),
-                                    new Class<?>[]{listenerClass},
-                                    new java.lang.reflect.InvocationHandler() {
-                                        @Override
-                                        public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args) throws Throwable {
-                                            if ("onLocationChanged".equals(method.getName()) && args != null && args.length > 0) {
-                                                Object location = args[0];
-                                                if (location != null) {
-                                                    // 清除mock标记
-                                                    try {
-                                                        XposedHelpers.callMethod(location, "setMock", false);
-                                                    } catch (Throwable ignored) {}
-
-                                                    // 替换为模拟坐标
-                                                    try {
-                                                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                                                        if (sh.getBoolean("locationEnabled", false)) {
-                                                            String latStr = sh.getString("lat", "");
-                                                            String lngStr = sh.getString("lng", "");
-                                                            if (!latStr.isEmpty() && !lngStr.isEmpty()) {
-                                                                XposedHelpers.callMethod(location, "setLatitude", Double.parseDouble(latStr));
-                                                                XposedHelpers.callMethod(location, "setLongitude", Double.parseDouble(lngStr));
-                                                            }
-                                                        }
-                                                    } catch (Throwable ignored) {}
-                                                }
-                                            }
-                                            return method.invoke(originalListener, args);
-                                        }
-                                    }
-                            );
-                            param.args[0] = proxyListener;
-                            Log.e(TAG, "Hook setLocationListener: 已安装代理监听器（上游替换坐标+清mock）");
-                        }
-                    });
-                    Log.e(TAG, "AMapLocationClient.setLocationListener Hook成功（最上游代理）");
-                } catch (Throwable t) {
-                    Log.e(TAG, "setLocationListener Hook失败: " + t.getMessage());
-                }
-            } catch (Throwable t) {
-                Log.e(TAG, "AMapLocationListener Hook失败: " + t.getMessage());
-            }
-
-            // ====== 上游Hook: 在SDK将坐标传递给逆地理编码之前就替换坐标 ======
-            // Hook AMapLocationClient.getLastKnownLocation - 返回模拟位置
-            try {
-                Class<?> clientClass = cl.loadClass("com.amap.api.location.AMapLocationClient");
-                XposedHelpers.findAndHookMethod(clientClass, "getLastKnownLocation", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String latStr = sh.getString("lat", "");
-                        String lngStr = sh.getString("lng", "");
-                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
-                        Object result = param.getResult();
-                        if (result != null) {
-                            XposedHelpers.callMethod(result, "setLatitude", Double.parseDouble(latStr));
-                            XposedHelpers.callMethod(result, "setLongitude", Double.parseDouble(lngStr));
-                            Log.e(TAG, "Hook AMapLocationClient.getLastKnownLocation: 已替换坐标为 " + latStr + "," + lngStr);
-                        }
-                    }
-                });
-                Log.e(TAG, "AMapLocationClient.getLastKnownLocation Hook成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "AMapLocationClient.getLastKnownLocation Hook失败: " + t.getMessage());
-            }
-
-            // Hook RegeocodeQuery.getPoint - 让逆地理编码查询使用模拟坐标
-            // 这是覆盖APP显式调用GeocodeSearch的最上游hook点
-            try {
-                Class<?> regeocodeQueryClass = cl.loadClass("com.amap.api.services.geocoder.RegeocodeQuery");
-                XposedHelpers.findAndHookMethod(regeocodeQueryClass, "getPoint", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String latStr = sh.getString("lat", "");
-                        String lngStr = sh.getString("lng", "");
-                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
-                        Object originalPoint = param.getResult();
-                        if (originalPoint != null) {
-                            double origLat = (Double) XposedHelpers.callMethod(originalPoint, "getLatitude");
-                            double origLng = (Double) XposedHelpers.callMethod(originalPoint, "getLongitude");
-                            Log.e(TAG, "Hook RegeocodeQuery.getPoint: 原始坐标 " + origLat + "," + origLng
-                                    + " -> 替换为 " + latStr + "," + lngStr);
-                            XposedHelpers.callMethod(originalPoint, "setLatitude", Double.parseDouble(latStr));
-                            XposedHelpers.callMethod(originalPoint, "setLongitude", Double.parseDouble(lngStr));
-                            param.setResult(originalPoint);
-                        }
-                    }
-                });
-                Log.e(TAG, "RegeocodeQuery.getPoint Hook成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "RegeocodeQuery.getPoint Hook失败: " + t.getMessage());
-            }
-
-            // Hook RegeocodeQuery构造函数 - 从源头替换坐标
-            // 这是最上游的hook，RegeocodeQuery创建时就把坐标替换为模拟坐标
-            try {
-                Class<?> regeocodeQueryClass = cl.loadClass("com.amap.api.services.geocoder.RegeocodeQuery");
-                Class<?> latLonPointClass = cl.loadClass("com.amap.api.services.core.LatLonPoint");
-                XposedHelpers.findAndHookConstructor(regeocodeQueryClass, latLonPointClass, float.class, String.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String latStr = sh.getString("lat", "");
-                        String lngStr = sh.getString("lng", "");
-                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
-                        Object point = param.args[0];
-                        if (point != null) {
-                            double origLat = (Double) XposedHelpers.callMethod(point, "getLatitude");
-                            double origLng = (Double) XposedHelpers.callMethod(point, "getLongitude");
-                            // 直接修改传入的point对象的坐标
-                            XposedHelpers.callMethod(point, "setLatitude", Double.parseDouble(latStr));
-                            XposedHelpers.callMethod(point, "setLongitude", Double.parseDouble(lngStr));
-                            Log.e(TAG, "Hook RegeocodeQuery构造函数: 原始坐标 " + origLat + "," + origLng
-                                    + " -> 替换为 " + latStr + "," + lngStr);
-                        }
-                    }
-                });
-                Log.e(TAG, "RegeocodeQuery构造函数 Hook成功 (最上游坐标拦截)");
-            } catch (Throwable t) {
-                Log.e(TAG, "RegeocodeQuery构造函数 Hook失败: " + t.getMessage());
-            }
-
-            // Hook LatLng - 高德地图UI组件使用的坐标类
-            // 地图选点、地图移动等场景都会用到这个类
-            try {
-                Class<?> latLngClass = cl.loadClass("com.amap.api.maps.model.LatLng");
-                // Hook构造函数 - 创建时就替换坐标
-                XposedHelpers.findAndHookConstructor(latLngClass, double.class, double.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String latStr = sh.getString("lat", "");
-                        String lngStr = sh.getString("lng", "");
-                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
-                        // 只在坐标与模拟坐标差异较大时替换（避免无限循环）
-                        double origLat = (Double) param.args[0];
-                        double origLng = (Double) param.args[1];
-                        double mockLat = Double.parseDouble(latStr);
-                        double mockLng = Double.parseDouble(lngStr);
-                        if (Math.abs(origLat - mockLat) > 0.0001 || Math.abs(origLng - mockLng) > 0.0001) {
-                            param.args[0] = mockLat;
-                            param.args[1] = mockLng;
-                            Log.e(TAG, "Hook LatLng构造函数: 原始 " + origLat + "," + origLng
-                                    + " -> 模拟 " + mockLat + "," + mockLng);
-                        }
-                    }
-                });
-                Log.e(TAG, "LatLng构造函数 Hook成功 (地图UI坐标拦截)");
-            } catch (Throwable t) {
-                Log.e(TAG, "LatLng Hook失败: " + t.getMessage());
-            }
-
-            // Hook GeocodeSearch.getFromLocation - 同步逆地理编码
-            try {
-                Class<?> geocodeSearchClass = cl.loadClass("com.amap.api.services.geocoder.GeocodeSearch");
-                Class<?> regeocodeQueryClass = cl.loadClass("com.amap.api.services.geocoder.RegeocodeQuery");
-                XposedHelpers.findAndHookMethod(geocodeSearchClass, "getFromLocation", regeocodeQueryClass, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String latStr = sh.getString("lat", "");
-                        String lngStr = sh.getString("lng", "");
-                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
-                        Object query = param.args[0];
-                        if (query != null) {
-                            Object point = XposedHelpers.callMethod(query, "getPoint");
-                            if (point != null) {
-                                XposedHelpers.callMethod(point, "setLatitude", Double.parseDouble(latStr));
-                                XposedHelpers.callMethod(point, "setLongitude", Double.parseDouble(lngStr));
-                                Log.e(TAG, "Hook GeocodeSearch.getFromLocation: 已替换查询坐标");
-                            }
-                        }
-                    }
-                });
-                Log.e(TAG, "GeocodeSearch.getFromLocation Hook成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "GeocodeSearch.getFromLocation Hook失败: " + t.getMessage());
-            }
-
-            // Hook GeocodeSearch.getFromLocationAsyn - 异步逆地理编码
-            try {
-                Class<?> geocodeSearchClass = cl.loadClass("com.amap.api.services.geocoder.GeocodeSearch");
-                Class<?> regeocodeQueryClass = cl.loadClass("com.amap.api.services.geocoder.RegeocodeQuery");
-                XposedHelpers.findAndHookMethod(geocodeSearchClass, "getFromLocationAsyn", regeocodeQueryClass, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String latStr = sh.getString("lat", "");
-                        String lngStr = sh.getString("lng", "");
-                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
-                        Object query = param.args[0];
-                        if (query != null) {
-                            Object point = XposedHelpers.callMethod(query, "getPoint");
-                            if (point != null) {
-                                XposedHelpers.callMethod(point, "setLatitude", Double.parseDouble(latStr));
-                                XposedHelpers.callMethod(point, "setLongitude", Double.parseDouble(lngStr));
-                                Log.e(TAG, "Hook GeocodeSearch.getFromLocationAsyn: 已替换查询坐标");
-                            }
-                        }
-                    }
-                });
-                Log.e(TAG, "GeocodeSearch.getFromLocationAsyn Hook成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "GeocodeSearch.getFromLocationAsyn Hook失败: " + t.getMessage());
-            }
-
-            // Hook LatLonPoint.getLatitude/getLongitude - 覆盖所有坐标读取
-            try {
-                Class<?> latLonPointClass = cl.loadClass("com.amap.api.services.core.LatLonPoint");
-                XposedHelpers.findAndHookMethod(latLonPointClass, "getLatitude", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String latStr = sh.getString("lat", "");
-                        if (latStr.isEmpty()) return;
-                        param.setResult(Double.parseDouble(latStr));
-                    }
-                });
-                XposedHelpers.findAndHookMethod(latLonPointClass, "getLongitude", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String lngStr = sh.getString("lng", "");
-                        if (lngStr.isEmpty()) return;
-                        param.setResult(Double.parseDouble(lngStr));
-                    }
-                });
-                Log.e(TAG, "LatLonPoint.getLatitude/getLongitude Hook成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "LatLonPoint Hook失败: " + t.getMessage());
-            }
-
-            // Hook getAddress - 返回模拟地址字符串
-            // 关键修复：即使mockAddress为空，也不返回真实地址，而是触发异步逆地理编码
-            XposedHelpers.findAndHookMethod(aMapLocationClass, "getAddress", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String addr = sh.getString("mockAddress", "");
-                    if (!addr.isEmpty()) {
-                        param.setResult(addr);
-                        Log.e(TAG, "Hook AMapLocation.getAddress: " + addr);
-                    } else {
-                        // mockAddress为空时，返回空字符串而不是真实地址
-                        // 同时触发异步逆地理编码
-                        param.setResult("");
-                        Log.e(TAG, "Hook AMapLocation.getAddress: mockAddress为空，返回空字符串并触发逆地理编码");
-                        // 触发异步逆地理编码（避免阻塞主线程）
-                        final String latStr = sh.getString("lat", "");
-                        final String lngStr = sh.getString("lng", "");
-                        if (!latStr.isEmpty() && !lngStr.isEmpty()) {
-                            // 使用uiHandler post到主线程触发（reverseGeocodeAsync内部会开子线程）
-                            uiHandler.post(() -> reverseGeocodeAsync());
-                        }
-                    }
-                }
-            });
-
-            // Hook setAddress - 在SDK设置地址时就替换为模拟地址
-            // 这是上游hook，在地址被写入AMapLocation之前就替换
-            try {
-                XposedHelpers.findAndHookMethod(aMapLocationClass, "setAddress", String.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String mockAddr = sh.getString("mockAddress", "");
-                        if (!mockAddr.isEmpty()) {
-                            String originalAddr = (String) param.args[0];
-                            if (originalAddr != null && !originalAddr.equals(mockAddr)) {
-                                Log.e(TAG, "Hook AMapLocation.setAddress: 原始地址 \"" + originalAddr + "\" -> 模拟地址 \"" + mockAddr + "\"");
-                            }
-                            param.args[0] = mockAddr;
-                        }
-                        // 如果mockAddress为空，允许设置真实地址（但getAddress会返回空字符串）
-                    }
-                });
-                Log.e(TAG, "AMapLocation.setAddress Hook成功 (上游地址拦截)");
-            } catch (Throwable t) {
-                Log.e(TAG, "AMapLocation.setAddress Hook失败: " + t.getMessage());
-            }
-
-            // Hook getProvince
-            XposedHelpers.findAndHookMethod(aMapLocationClass, "getProvince", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String val = sh.getString("mockProvince", "");
-                    if (!val.isEmpty()) param.setResult(val);
-                }
-            });
-
-            // Hook getCity
-            XposedHelpers.findAndHookMethod(aMapLocationClass, "getCity", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String val = sh.getString("mockCity", "");
-                    if (!val.isEmpty()) param.setResult(val);
-                }
-            });
-
-            // Hook getDistrict
-            XposedHelpers.findAndHookMethod(aMapLocationClass, "getDistrict", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String val = sh.getString("mockDistrict", "");
-                    if (!val.isEmpty()) param.setResult(val);
-                }
-            });
-
-            // Hook getStreet
-            XposedHelpers.findAndHookMethod(aMapLocationClass, "getStreet", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String val = sh.getString("mockStreet", "");
-                    if (!val.isEmpty()) param.setResult(val);
-                }
-            });
-
-            // Hook getCityCode
-            XposedHelpers.findAndHookMethod(aMapLocationClass, "getCityCode", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String val = sh.getString("mockCityCode", "");
-                    if (!val.isEmpty()) param.setResult(val);
-                }
-            });
-
-            // Hook getAdCode
-            XposedHelpers.findAndHookMethod(aMapLocationClass, "getAdCode", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String val = sh.getString("mockAdCode", "");
-                    if (!val.isEmpty()) param.setResult(val);
-                }
-            });
-
-            // Hook getLatitude
-            XposedHelpers.findAndHookMethod(aMapLocationClass, "getLatitude", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    boolean isGps = sh.getBoolean("locationEnabled", false);
-                    if (!isGps) return;
-                    String latStr = sh.getString("lat", "");
-                    if (latStr.isEmpty()) return;
-                    try {
-                        double lat = Double.parseDouble(latStr);
-                        Log.e(TAG, "Hook AMapLocation.getLatitude: " + lat);
-                        param.setResult(lat);
-                    } catch (NumberFormatException e) {
-                        Log.e(TAG, "纬度格式错误", e);
-                    }
-                }
-            });
-            // Hook getLongitude
-            XposedHelpers.findAndHookMethod(aMapLocationClass, "getLongitude", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    boolean isGps = sh.getBoolean("locationEnabled", false);
-                    if (!isGps) return;
-                    String lngStr = sh.getString("lng", "");
-                    if (lngStr.isEmpty()) return;
-                    try {
-                        double lng = Double.parseDouble(lngStr);
-                        Log.e(TAG, "Hook AMapLocation.getLongitude: " + lng);
-                        param.setResult(lng);
-                    } catch (NumberFormatException e) {
-                        Log.e(TAG, "经度格式错误", e);
-                    }
-                }
-            });
-
-            // Hook isMock 返回 false，防止被检测为模拟位置
-            try {
-                XposedHelpers.findAndHookMethod(aMapLocationClass, "isMock", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (sh.getBoolean("locationEnabled", false)) {
-                            param.setResult(false);
-                        }
-                    }
-                });
-            } catch (Throwable ignored) {}
-
-            // Hook setLatitude/setLongitude - 让SDK内部设置坐标时就被替换为模拟坐标
-            // 这是最上游的hook，SDK内部无论是从GPS/网络/WiFi拿到坐标后，
-            // 都会调用setLatitude/setLongitude写入AMapLocation
-            // 我们在这里拦截，让写入的就是模拟坐标
-            // 这样SDK内部后续的逆地理编码就会用模拟坐标去查询
-            try {
-                XposedHelpers.findAndHookMethod(aMapLocationClass, "setLatitude", double.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String latStr = sh.getString("lat", "");
-                        if (latStr.isEmpty()) return;
-                        try {
-                            double originalLat = (Double) param.args[0];
-                            double fakeLat = Double.parseDouble(latStr);
-                            if (Math.abs(originalLat - fakeLat) > 0.0001) {
-                                Log.e(TAG, "Hook AMapLocation.setLatitude: 原始 " + originalLat + " -> 模拟 " + fakeLat);
-                            }
-                            param.args[0] = fakeLat;
-                        } catch (NumberFormatException ignored) {}
-                    }
-                });
-                XposedHelpers.findAndHookMethod(aMapLocationClass, "setLongitude", double.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String lngStr = sh.getString("lng", "");
-                        if (lngStr.isEmpty()) return;
-                        try {
-                            double originalLng = (Double) param.args[0];
-                            double fakeLng = Double.parseDouble(lngStr);
-                            if (Math.abs(originalLng - fakeLng) > 0.0001) {
-                                Log.e(TAG, "Hook AMapLocation.setLongitude: 原始 " + originalLng + " -> 模拟 " + fakeLng);
-                            }
-                            param.args[0] = fakeLng;
-                        } catch (NumberFormatException ignored) {}
-                    }
-                });
-                Log.e(TAG, "AMapLocation.setLatitude/setLongitude Hook成功 (上游坐标拦截)");
-            } catch (Throwable t) {
-                Log.e(TAG, "AMapLocation.setLatitude Hook失败: " + t.getMessage());
-            }
-
-            Log.e(TAG, "高德定位Hook成功(含上游坐标拦截+地址+逆地理编码)");
-        } catch (Throwable t) {
-            Log.e(TAG, "高德定位Hook失败", t);
-        }
-    }
-
+    /**
+     * 最源头的虚拟定位方案：直接hook系统LocationManager
+     * 在系统回调LocationListener.onLocationChanged时就替换坐标
+     * 这样所有上层SDK（高德、腾讯等）拿到的都是模拟坐标
+     */
     private void hookSystemLocation(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             ClassLoader cl = lpparam.classLoader;
 
-            // Hook Location.isFromMockProvider - 绕过系统模拟位置检测
-            try {
-                XposedHelpers.findAndHookMethod("android.location.Location", cl, "isFromMockProvider", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        param.setResult(false);
-                    }
-                });
-                Log.e(TAG, "Location.isFromMockProvider Hook成功（绕过系统模拟位置检测）");
-            } catch (Throwable t) {
-                Log.e(TAG, "Location.isFromMockProvider Hook失败: " + t.getMessage());
-            }
-
-            // ====== 【最源头】Hook LocationManager.requestLocationUpdates ======
+            // ====== 【最核心】Hook LocationManager.requestLocationUpdates ======
             // 用动态代理包装所有LocationListener，在系统回调时就替换坐标
-            // 这是所有定位SDK（包括高德）获取坐标的最源头
             try {
                 Class<?> locationListenerClass = cl.loadClass("android.location.LocationListener");
-
-                // 保存原始listener到代理的映射，用于removeUpdates
                 final java.util.Map<Object, Object> listenerProxyMap = new java.util.concurrent.ConcurrentHashMap<>();
 
-                // hook多个重载版本的requestLocationUpdates
+                // hook requestLocationUpdates 和 requestSingleUpdate
                 String[] requestMethods = {
                         "requestLocationUpdates",
                         "requestSingleUpdate"
@@ -2263,12 +1725,10 @@ public class Hook implements IXposedHookLoadPackage {
                                         final android.location.LocationListener originalListener =
                                                 (android.location.LocationListener) param.args[i];
 
-                                        // 检查是否已经是代理
                                         if (java.lang.reflect.Proxy.isProxyClass(originalListener.getClass())) {
                                             return;
                                         }
 
-                                        // 创建代理
                                         Object proxy = java.lang.reflect.Proxy.newProxyInstance(
                                                 locationListenerClass.getClassLoader(),
                                                 new Class<?>[]{locationListenerClass},
@@ -2279,11 +1739,10 @@ public class Hook implements IXposedHookLoadPackage {
                                                                 && args != null && args.length > 0
                                                                 && args[0] instanceof android.location.Location) {
                                                             android.location.Location location = (android.location.Location) args[0];
-                                                            // 替换为模拟坐标
                                                             try {
                                                                 location.setLatitude(Double.parseDouble(latStr));
                                                                 location.setLongitude(Double.parseDouble(lngStr));
-                                                                // 清除mock标记（通过反射设置mIsFromMockProvider）
+                                                                // 清除mock标记
                                                                 try {
                                                                     java.lang.reflect.Field mockField = android.location.Location.class.getDeclaredField("mIsFromMockProvider");
                                                                     mockField.setAccessible(true);
@@ -2297,19 +1756,19 @@ public class Hook implements IXposedHookLoadPackage {
                                         );
                                         param.args[i] = proxy;
                                         listenerProxyMap.put(originalListener, proxy);
-                                        Log.e(TAG, "Hook " + methodName + ": 已安装最上游LocationListener代理");
+                                        Log.e(TAG, "Hook " + methodName + ": 已安装最上游代理");
                                         break;
                                     }
                                 }
                             }
                         });
-                        Log.e(TAG, "LocationManager." + methodName + " Hook成功（最上游代理）");
+                        Log.e(TAG, "LocationManager." + methodName + " Hook成功");
                     } catch (Throwable t) {
                         Log.e(TAG, "LocationManager." + methodName + " Hook失败: " + t.getMessage());
                     }
                 }
 
-                // hook removeUpdates，确保移除时用代理移除
+                // hook removeUpdates
                 try {
                     de.robv.android.xposed.XposedBridge.hookAllMethods(
                             android.location.LocationManager.class, "removeUpdates", new XC_MethodHook() {
@@ -2328,77 +1787,27 @@ public class Hook implements IXposedHookLoadPackage {
                             }
                         }
                     });
-                    Log.e(TAG, "LocationManager.removeUpdates Hook成功");
-                } catch (Throwable t) {
-                    Log.e(TAG, "LocationManager.removeUpdates Hook失败: " + t.getMessage());
-                }
+                } catch (Throwable ignored) {}
             } catch (Throwable t) {
-                Log.e(TAG, "LocationManager.requestLocationUpdates Hook失败: " + t.getMessage());
+                Log.e(TAG, "LocationManager Hook失败: " + t.getMessage());
             }
 
-            // Hook Location.getLatitude
-            XposedHelpers.findAndHookMethod("android.location.Location", cl, "getLatitude", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String latStr = sh.getString("lat", "");
-                    if (latStr.isEmpty()) return;
-                    try {
-                        param.setResult(Double.parseDouble(latStr));
-                    } catch (NumberFormatException ignored) {}
-                }
-            });
-
-            // Hook Location.getLongitude
-            XposedHelpers.findAndHookMethod("android.location.Location", cl, "getLongitude", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String lngStr = sh.getString("lng", "");
-                    if (lngStr.isEmpty()) return;
-                    try {
-                        param.setResult(Double.parseDouble(lngStr));
-                    } catch (NumberFormatException ignored) {}
-                }
-            });
-
-            // Hook LocationManager.getLastKnownLocation
-            XposedHelpers.findAndHookMethod("android.location.LocationManager", cl,
-                    "getLastKnownLocation", String.class, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String latStr = sh.getString("lat", "");
-                    String lngStr = sh.getString("lng", "");
-                    if (latStr.isEmpty() || lngStr.isEmpty()) return;
-                    android.location.Location loc = (android.location.Location) param.getResult();
-                    if (loc == null) {
-                        loc = new android.location.Location(android.location.LocationManager.GPS_PROVIDER);
-                    }
-                    loc.setLatitude(Double.parseDouble(latStr));
-                    loc.setLongitude(Double.parseDouble(lngStr));
-                    param.setResult(loc);
-                    Log.e(TAG, "Hook LocationManager.getLastKnownLocation: " + latStr + ", " + lngStr);
-                }
-            });
-
-            Log.e(TAG, "系统定位Hook成功");
-        } catch (Throwable t) {
-            Log.e(TAG, "系统定位Hook失败", t);
-        }
-    }
-
-    private void hookTencentLocation(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            ClassLoader cl = lpparam.classLoader;
-
-            // Hook TencentLocation.getLatitude / getLongitude
+            // ====== Hook Location.isFromMockProvider - 清除模拟位置标记 ======
             try {
-                Class<?> tencentLocClass = cl.loadClass("com.tencent.map.geolocation.TencentLocation");
-                XposedHelpers.findAndHookMethod(tencentLocClass, "getLatitude", new XC_MethodHook() {
+                XposedHelpers.findAndHookMethod("android.location.Location", cl, "isFromMockProvider", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        param.setResult(false);
+                    }
+                });
+                Log.e(TAG, "Location.isFromMockProvider Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "Location.isFromMockProvider Hook失败: " + t.getMessage());
+            }
+
+            // ====== Hook Location.getLatitude/getLongitude - 兜底 ======
+            try {
+                XposedHelpers.findAndHookMethod("android.location.Location", cl, "getLatitude", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
@@ -2410,7 +1819,13 @@ public class Hook implements IXposedHookLoadPackage {
                         } catch (NumberFormatException ignored) {}
                     }
                 });
-                XposedHelpers.findAndHookMethod(tencentLocClass, "getLongitude", new XC_MethodHook() {
+                Log.e(TAG, "Location.getLatitude Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "Location.getLatitude Hook失败: " + t.getMessage());
+            }
+
+            try {
+                XposedHelpers.findAndHookMethod("android.location.Location", cl, "getLongitude", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
@@ -2422,184 +1837,39 @@ public class Hook implements IXposedHookLoadPackage {
                         } catch (NumberFormatException ignored) {}
                     }
                 });
-                // Hook TencentLocation.getAddress
-                XposedHelpers.findAndHookMethod(tencentLocClass, "getAddress", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String addr = sh.getString("mockAddress", "");
-                        if (!addr.isEmpty()) {
-                            param.setResult(addr);
-                            Log.e(TAG, "Hook TencentLocation.getAddress: " + addr);
-                        } else {
-                            // mockAddress为空时，返回空字符串而不是真实地址
-                            param.setResult("");
-                            Log.e(TAG, "Hook TencentLocation.getAddress: mockAddress为空，返回空字符串");
-                            // 触发异步逆地理编码
-                            final String latStr = sh.getString("lat", "");
-                            final String lngStr = sh.getString("lng", "");
-                            if (!latStr.isEmpty() && !lngStr.isEmpty()) {
-                                uiHandler.post(() -> reverseGeocodeAsync());
-                            }
-                        }
-                    }
-                });
-                // Hook TencentLocation.getCity
-                try {
-                    XposedHelpers.findAndHookMethod(tencentLocClass, "getCity", new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                            if (!sh.getBoolean("locationEnabled", false)) return;
-                            String val = sh.getString("mockCity", "");
-                            if (!val.isEmpty()) param.setResult(val);
-                        }
-                    });
-                } catch (Throwable ignored) {}
-                // Hook TencentLocation.getDistrict
-                try {
-                    XposedHelpers.findAndHookMethod(tencentLocClass, "getDistrict", new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                            if (!sh.getBoolean("locationEnabled", false)) return;
-                            String val = sh.getString("mockDistrict", "");
-                            if (!val.isEmpty()) param.setResult(val);
-                        }
-                    });
-                } catch (Throwable ignored) {}
-                Log.e(TAG, "腾讯定位 TencentLocation Hook成功(含地址)");
+                Log.e(TAG, "Location.getLongitude Hook成功");
             } catch (Throwable t) {
-                Log.e(TAG, "腾讯定位 TencentLocation Hook失败", t);
+                Log.e(TAG, "Location.getLongitude Hook失败: " + t.getMessage());
             }
 
-            // Hook TencentLocationManager.getLastKnownLocation
+            // ====== Hook LocationManager.getLastKnownLocation - 兜底 ======
             try {
-                Class<?> tencentLocMgrClass = cl.loadClass("com.tencent.map.geolocation.TencentLocationManager");
-                XposedHelpers.findAndHookMethod(tencentLocMgrClass, "getLastKnownLocation", new XC_MethodHook() {
+                XposedHelpers.findAndHookMethod("android.location.LocationManager", cl,
+                        "getLastKnownLocation", String.class, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
                         if (!sh.getBoolean("locationEnabled", false)) return;
-                        Log.e(TAG, "Hook TencentLocationManager.getLastKnownLocation");
+                        String latStr = sh.getString("lat", "");
+                        String lngStr = sh.getString("lng", "");
+                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
+                        android.location.Location loc = (android.location.Location) param.getResult();
+                        if (loc == null) {
+                            loc = new android.location.Location(android.location.LocationManager.GPS_PROVIDER);
+                        }
+                        loc.setLatitude(Double.parseDouble(latStr));
+                        loc.setLongitude(Double.parseDouble(lngStr));
+                        param.setResult(loc);
                     }
                 });
-                Log.e(TAG, "腾讯定位 TencentLocationManager Hook成功");
+                Log.e(TAG, "LocationManager.getLastKnownLocation Hook成功");
             } catch (Throwable t) {
-                Log.e(TAG, "腾讯定位 TencentLocationManager Hook失败", t);
+                Log.e(TAG, "getLastKnownLocation Hook失败: " + t.getMessage());
             }
+
+            Log.e(TAG, "系统定位Hook完成（最源头方案）");
         } catch (Throwable t) {
-            Log.e(TAG, "腾讯定位Hook整体失败", t);
-        }
-    }
-
-    private void hookCellLocation(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            ClassLoader cl = lpparam.classLoader;
-
-            // Hook TelephonyManager.getCellLocation
-            XposedHelpers.findAndHookMethod("android.telephony.TelephonyManager", cl,
-                    "getCellLocation", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    // 构造一个假的GsmCellLocation，避免APP因获取不到基站而异常
-                    try {
-                        android.telephony.gsm.GsmCellLocation fakeCell = new android.telephony.gsm.GsmCellLocation();
-                        fakeCell.setLacAndCid(12345, 67890);
-                        param.setResult(fakeCell);
-                        Log.e(TAG, "Hook TelephonyManager.getCellLocation -> fake GSM cell");
-                    } catch (Throwable inner) {
-                        // 如果构造失败，返回null
-                        param.setResult(null);
-                    }
-                }
-            });
-
-            // Hook TelephonyManager.getAllCellInfo
-            XposedHelpers.findAndHookMethod("android.telephony.TelephonyManager", cl,
-                    "getAllCellInfo", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    param.setResult(new ArrayList<>());
-                    Log.e(TAG, "Hook TelephonyManager.getAllCellInfo -> empty list");
-                }
-            });
-
-            Log.e(TAG, "基站定位Hook成功");
-        } catch (Throwable t) {
-            Log.e(TAG, "基站定位Hook失败", t);
-        }
-    }
-
-    /**
-     * Hook LocationResult.getGpsAddress - 蓝月亮内部定位结果类
-     * 确保APP内部所有读取gpsAddress的地方都拿到模拟地址
-     */
-    private void hookLocationResult(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            ClassLoader cl = lpparam.classLoader;
-            Class<?> locationResultClass = cl.loadClass("cn.com.bluemoon.sfa.utils.location.LocationResult");
-            XposedHelpers.findAndHookMethod(locationResultClass, "getGpsAddress", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String addr = sh.getString("mockAddress", "");
-                    if (!addr.isEmpty()) {
-                        param.setResult(addr);
-                        Log.e(TAG, "Hook LocationResult.getGpsAddress: " + addr);
-                    } else {
-                        // mockAddress为空时，返回空字符串而不是真实地址
-                        param.setResult("");
-                        Log.e(TAG, "Hook LocationResult.getGpsAddress: mockAddress为空，返回空字符串");
-                        // 触发异步逆地理编码
-                        final String latStr = sh.getString("lat", "");
-                        final String lngStr = sh.getString("lng", "");
-                        if (!latStr.isEmpty() && !lngStr.isEmpty()) {
-                            uiHandler.post(() -> reverseGeocodeAsync());
-                        }
-                    }
-                }
-            });
-            Log.e(TAG, "LocationResult.getGpsAddress Hook成功");
-        } catch (Throwable t) {
-            Log.e(TAG, "LocationResult.getGpsAddress Hook失败: " + t.getMessage());
-        }
-
-        // Hook LocationParam.getGpsAddress（另一套定位参数类）
-        try {
-            ClassLoader cl = lpparam.classLoader;
-            Class<?> locationParamClass = cl.loadClass("bluemoon.com.lib_x5.bean.LocationParam");
-            XposedHelpers.findAndHookMethod(locationParamClass, "getGpsAddress", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                    SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                    if (!sh.getBoolean("locationEnabled", false)) return;
-                    String addr = sh.getString("mockAddress", "");
-                    if (!addr.isEmpty()) {
-                        param.setResult(addr);
-                        Log.e(TAG, "Hook LocationParam.getGpsAddress: " + addr);
-                    } else {
-                        // mockAddress为空时，返回空字符串而不是真实地址
-                        param.setResult("");
-                        Log.e(TAG, "Hook LocationParam.getGpsAddress: mockAddress为空，返回空字符串");
-                        // 触发异步逆地理编码
-                        final String latStr = sh.getString("lat", "");
-                        final String lngStr = sh.getString("lng", "");
-                        if (!latStr.isEmpty() && !lngStr.isEmpty()) {
-                            uiHandler.post(() -> reverseGeocodeAsync());
-                        }
-                    }
-                }
-            });
-            Log.e(TAG, "LocationParam.getGpsAddress Hook成功");
-        } catch (Throwable t) {
-            Log.e(TAG, "LocationParam.getGpsAddress Hook失败: " + t.getMessage());
+            Log.e(TAG, "系统定位Hook异常", t);
         }
     }
 
