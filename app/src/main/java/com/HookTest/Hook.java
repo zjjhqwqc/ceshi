@@ -2570,7 +2570,8 @@ public class Hook implements IXposedHookLoadPackage {
     private static volatile long lastReverseGeocodeTime = 0;
 
     /**
-     * 使用高德地图Web API进行逆地理编码，将虚拟经纬度自动转换为地址
+     * 使用高德SDK的GeocodeSearch进行逆地理编码，将虚拟经纬度自动转换为地址
+     * 使用SDK自带的key，确保有效性
      */
     private void reverseGeocodeAsync() {
         if (appContext == null || customLat.isEmpty() || customLng.isEmpty()) return;
@@ -2584,9 +2585,172 @@ public class Hook implements IXposedHookLoadPackage {
         lastReverseGeocodeTime = now;
         final String targetLat = customLat;
         final String targetLng = customLng;
+
+        // 使用UI线程执行GeocodeSearch（SDK要求在主线程回调）
+        uiHandler.post(() -> {
+            try {
+                ClassLoader cl = appContext.getClassLoader();
+                // 加载GeocodeSearch相关类
+                Class<?> geocodeSearchClass = cl.loadClass("com.amap.api.services.geocoder.GeocodeSearch");
+                Class<?> latLonPointClass = cl.loadClass("com.amap.api.services.core.LatLonPoint");
+                Class<?> regeocodeQueryClass = cl.loadClass("com.amap.api.services.geocoder.RegeocodeQuery");
+                Class<?> onGeocodeSearchListenerClass = cl.loadClass("com.amap.api.services.geocoder.GeocodeSearch$OnGeocodeSearchListener");
+
+                // 创建LatLonPoint
+                Object latLonPoint = XposedHelpers.newInstance(latLonPointClass,
+                        new Class<?>[]{double.class, double.class},
+                        Double.parseDouble(targetLat), Double.parseDouble(targetLng));
+
+                // 创建RegeocodeQuery (LatLonPoint point, float radius, String latLonType)
+                final Object regeocodeQuery = XposedHelpers.newInstance(regeocodeQueryClass,
+                        new Class<?>[]{latLonPointClass, float.class, String.class},
+                        latLonPoint, 1000f, "autonavi");
+
+                // 创建GeocodeSearch
+                final Object geocodeSearch = XposedHelpers.newInstance(geocodeSearchClass,
+                        new Class<?>[]{Context.class}, appContext);
+
+                // 设置监听器 - 使用动态代理创建OnGeocodeSearchListener
+                Object listener = java.lang.reflect.Proxy.newProxyInstance(
+                        cl,
+                        new Class<?>[]{onGeocodeSearchListenerClass},
+                        new java.lang.reflect.InvocationHandler() {
+                            @Override
+                            public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args) throws Throwable {
+                                String methodName = method.getName();
+                                if ("onRegeocodeSearched".equals(methodName)) {
+                                    // args[0] = RegeocodeResult, args[1] = resultCode
+                                    handleRegeocodeResult(args[0], (Integer) args[1]);
+                                } else if ("onGeocodeSearched".equals(methodName)) {
+                                    // 地理编码（地址转坐标）的回调，忽略
+                                }
+                                return null;
+                            }
+                        });
+
+                XposedHelpers.callMethod(geocodeSearch, "setOnGeocodeSearchListener", listener);
+
+                // 发起异步逆地理编码请求
+                XposedHelpers.callMethod(geocodeSearch, "getFromLocationAsyn", regeocodeQuery);
+
+                Log.e(TAG, "已发起SDK逆地理编码请求: " + targetLat + "," + targetLng);
+
+            } catch (Throwable e) {
+                Log.e(TAG, "SDK逆地理编码启动失败，尝试Web API方式", e);
+                // SDK方式失败，降级使用Web API
+                reverseGeocodeByWebApi(targetLat, targetLng);
+            }
+        });
+    }
+
+    /**
+     * 处理逆地理编码结果
+     */
+    private void handleRegeocodeResult(Object regeocodeResult, int resultCode) {
+        try {
+            // resultCode = 1000 表示成功
+            if (resultCode == 1000 && regeocodeResult != null) {
+                // 获取RegeocodeAddress
+                Object regeocodeAddress = XposedHelpers.callMethod(regeocodeResult, "getRegeocodeAddress");
+                if (regeocodeAddress != null) {
+                    // 获取格式化地址
+                    String formattedAddress = (String) XposedHelpers.callMethod(regeocodeAddress, "getFormatAddress");
+                    if (formattedAddress == null) formattedAddress = "";
+
+                    // 获取地址组件
+                    String province = "";
+                    String city = "";
+                    String district = "";
+                    String street = "";
+                    String adcode = "";
+                    String citycode = "";
+
+                    try {
+                        Object streetNumber = XposedHelpers.callMethod(regeocodeAddress, "getStreetNumber");
+                        if (streetNumber != null) {
+                            street = (String) XposedHelpers.callMethod(streetNumber, "getStreet");
+                            if (street == null) street = "";
+                        }
+                    } catch (Throwable ignored) {}
+
+                    try {
+                        province = (String) XposedHelpers.callMethod(regeocodeAddress, "getProvince");
+                        if (province == null) province = "";
+                    } catch (Throwable ignored) {}
+
+                    try {
+                        city = (String) XposedHelpers.callMethod(regeocodeAddress, "getCity");
+                        if (city == null) city = "";
+                    } catch (Throwable ignored) {}
+
+                    try {
+                        district = (String) XposedHelpers.callMethod(regeocodeAddress, "getDistrict");
+                        if (district == null) district = "";
+                    } catch (Throwable ignored) {}
+
+                    try {
+                        adcode = (String) XposedHelpers.callMethod(regeocodeAddress, "getAdCode");
+                        if (adcode == null) adcode = "";
+                    } catch (Throwable ignored) {}
+
+                    try {
+                        citycode = (String) XposedHelpers.callMethod(regeocodeAddress, "getCityCode");
+                        if (citycode == null) citycode = "";
+                    } catch (Throwable ignored) {}
+
+                    // 保存到SharedPreferences
+                    SharedPreferences.Editor ed = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit();
+                    ed.putString("mockAddress", formattedAddress);
+                    ed.putString("mockProvince", province);
+                    ed.putString("mockCity", city);
+                    ed.putString("mockDistrict", district);
+                    ed.putString("mockStreet", street);
+                    ed.putString("mockAdCode", adcode);
+                    ed.putString("mockCityCode", citycode);
+                    ed.apply();
+
+                    // 更新全局变量
+                    mockAddress = formattedAddress;
+                    mockProvince = province;
+                    mockCity = city;
+                    mockDistrict = district;
+
+                    isReverseGeocoding = false;
+
+                    Log.e(TAG, "SDK逆地理编码成功: " + formattedAddress + " [" + province + city + district + "]");
+
+                    final String finalAddr = formattedAddress;
+                    uiHandler.post(() -> {
+                        if (appContext != null) {
+                            Toast.makeText(appContext, "已自动获取地址: " + finalAddr, Toast.LENGTH_LONG).show();
+                        }
+                    });
+                    return;
+                }
+            }
+
+            Log.e(TAG, "SDK逆地理编码失败: resultCode=" + resultCode);
+            // SDK方式失败，尝试Web API
+            reverseGeocodeByWebApi(customLat, customLng);
+
+        } catch (Throwable e) {
+            Log.e(TAG, "处理逆地理编码结果异常", e);
+            // 异常时尝试Web API
+            reverseGeocodeByWebApi(customLat, customLng);
+        }
+    }
+
+    /**
+     * 使用高德地图Web API进行逆地理编码（备用方案）
+     */
+    private void reverseGeocodeByWebApi(final String targetLat, final String targetLng) {
+        if (appContext == null || targetLat.isEmpty() || targetLng.isEmpty()) {
+            isReverseGeocoding = false;
+            return;
+        }
         new Thread(() -> {
             try {
-                // 使用蓝月亮APK中提取的高德key
+                // 使用蓝月亮APK中提取的高德key（注意：Android SDK key可能不适用于Web API）
                 String apiKey = "ed6016242c8f18984ac27a01ec82d241";
                 String urlStr = "https://restapi.amap.com/v3/geocode/regeo?key=" + apiKey
                         + "&location=" + targetLng + "," + targetLat
@@ -2603,7 +2767,7 @@ public class Hook implements IXposedHookLoadPackage {
                     while ((line = reader.readLine()) != null) sb.append(line);
                     reader.close();
                     String jsonStr = sb.toString();
-                    Log.e(TAG, "逆地理编码响应: " + jsonStr);
+                    Log.e(TAG, "Web API逆地理编码响应: " + jsonStr);
                     JSONObject json = new JSONObject(jsonStr);
                     if ("1".equals(json.optString("status"))) {
                         JSONObject regeocode = json.optJSONObject("regeocode");
@@ -2640,22 +2804,23 @@ public class Hook implements IXposedHookLoadPackage {
                             mockProvince = province;
                             mockCity = city;
                             mockDistrict = district;
-                            Log.e(TAG, "逆地理编码成功: " + formattedAddress + " [" + province + city + district + "]");
+                            Log.e(TAG, "Web API逆地理编码成功: " + formattedAddress + " [" + province + city + district + "]");
                             uiHandler.post(() -> {
                                 if (appContext != null) {
                                     Toast.makeText(appContext, "已自动获取地址: " + formattedAddress, Toast.LENGTH_LONG).show();
                                 }
                             });
+                            return;
                         }
                     } else {
                         String info = json.optString("info", "未知错误");
-                        Log.e(TAG, "逆地理编码API错误: " + info);
+                        Log.e(TAG, "Web API逆地理编码错误: " + info);
                     }
                 } else {
-                    Log.e(TAG, "逆地理编码HTTP错误: " + code);
+                    Log.e(TAG, "Web API逆地理编码HTTP错误: " + code);
                 }
             } catch (Exception e) {
-                Log.e(TAG, "逆地理编码异常", e);
+                Log.e(TAG, "Web API逆地理编码异常", e);
             } finally {
                 isReverseGeocoding = false;
             }
