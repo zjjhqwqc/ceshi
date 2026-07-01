@@ -1537,6 +1537,52 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "System.getProperty Hook失败: " + t.getMessage());
             }
 
+            // ===== Hook Settings.Secure - 绕过系统模拟位置设置检测 =====
+            // APP通过Settings.Secure.getInt("mock_location")检测是否开启了模拟位置
+            try {
+                Class<?> secureClass = cl.loadClass("android.provider.Settings$Secure");
+
+                // hook getInt - mock_location 返回0（关闭）
+                try {
+                    XposedHelpers.findAndHookMethod(secureClass, "getInt",
+                            android.content.ContentResolver.class, String.class, int.class,
+                            new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            String key = (String) param.args[1];
+                            if (key != null && "mock_location".equals(key)) {
+                                param.setResult(0); // 0 = 关闭
+                                Log.e(TAG, "Hook Settings.Secure.getInt mock_location: 返回0（关闭）");
+                            }
+                        }
+                    });
+                    Log.e(TAG, "Settings.Secure.getInt Hook成功");
+                } catch (Throwable t) {
+                    Log.e(TAG, "Settings.Secure.getInt Hook失败: " + t.getMessage());
+                }
+
+                // hook getString - mock_location 返回"0"
+                try {
+                    XposedHelpers.findAndHookMethod(secureClass, "getString",
+                            android.content.ContentResolver.class, String.class,
+                            new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            String key = (String) param.args[1];
+                            if (key != null && "mock_location".equals(key)) {
+                                param.setResult("0");
+                                Log.e(TAG, "Hook Settings.Secure.getString mock_location: 返回\"0\"");
+                            }
+                        }
+                    });
+                    Log.e(TAG, "Settings.Secure.getString Hook成功");
+                } catch (Throwable t) {
+                    Log.e(TAG, "Settings.Secure.getString Hook失败: " + t.getMessage());
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "Settings.Secure Hook失败: " + t.getMessage());
+            }
+
             // ===== Hook GDLocationUtil - 蓝月亮高德定位工具类（最关键！） =====
             // notCheckMock 是 GDLocationUtil$Companion 的实例字段，不是静态字段
             // 注意：不能直接阻止checkMockSync执行，因为它有回调参数，阻止会导致定位流程中断
@@ -1687,6 +1733,66 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "AMapLocationClientOption.setMockEnable Hook成功");
             } catch (Throwable t) {
                 Log.e(TAG, "AMapLocationClientOption.setMockEnable Hook失败: " + t.getMessage());
+            }
+
+            // ====== 【最上游】Hook高德定位回调接口 - 在定位结果返回时就替换坐标并清除mock标记 ======
+            // 这是最关键的hook点：所有定位结果（包括checkMockSync的检测定位）都会经过这里
+            // 我们在回调的最上游就把坐标替换成模拟坐标，并设置isMock=false
+            try {
+                Class<?> listenerClass = cl.loadClass("com.amap.api.location.AMapLocationListener");
+                // hook AMapLocationClient.setLocationListener - 拦截监听器设置
+                try {
+                    Class<?> clientClass = cl.loadClass("com.amap.api.location.AMapLocationClient");
+                    XposedHelpers.findAndHookMethod(clientClass, "setLocationListener",
+                            listenerClass, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            final Object originalListener = param.args[0];
+                            if (originalListener == null) return;
+
+                            // 创建一个代理监听器，在回调前替换坐标
+                            Object proxyListener = java.lang.reflect.Proxy.newProxyInstance(
+                                    listenerClass.getClassLoader(),
+                                    new Class<?>[]{listenerClass},
+                                    new java.lang.reflect.InvocationHandler() {
+                                        @Override
+                                        public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args) throws Throwable {
+                                            if ("onLocationChanged".equals(method.getName()) && args != null && args.length > 0) {
+                                                Object location = args[0];
+                                                if (location != null) {
+                                                    // 清除mock标记
+                                                    try {
+                                                        XposedHelpers.callMethod(location, "setMock", false);
+                                                    } catch (Throwable ignored) {}
+
+                                                    // 替换为模拟坐标
+                                                    try {
+                                                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                                                        if (sh.getBoolean("locationEnabled", false)) {
+                                                            String latStr = sh.getString("lat", "");
+                                                            String lngStr = sh.getString("lng", "");
+                                                            if (!latStr.isEmpty() && !lngStr.isEmpty()) {
+                                                                XposedHelpers.callMethod(location, "setLatitude", Double.parseDouble(latStr));
+                                                                XposedHelpers.callMethod(location, "setLongitude", Double.parseDouble(lngStr));
+                                                            }
+                                                        }
+                                                    } catch (Throwable ignored) {}
+                                                }
+                                            }
+                                            return method.invoke(originalListener, args);
+                                        }
+                                    }
+                            );
+                            param.args[0] = proxyListener;
+                            Log.e(TAG, "Hook setLocationListener: 已安装代理监听器（上游替换坐标+清mock）");
+                        }
+                    });
+                    Log.e(TAG, "AMapLocationClient.setLocationListener Hook成功（最上游代理）");
+                } catch (Throwable t) {
+                    Log.e(TAG, "setLocationListener Hook失败: " + t.getMessage());
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "AMapLocationListener Hook失败: " + t.getMessage());
             }
 
             // ====== 上游Hook: 在SDK将坐标传递给逆地理编码之前就替换坐标 ======
