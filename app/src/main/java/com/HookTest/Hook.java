@@ -1433,35 +1433,9 @@ public class Hook implements IXposedHookLoadPackage {
             }
 
             // ===== 通用Xposed检测绕过 - 栈追踪过滤 =====
-            try {
-                XposedHelpers.findAndHookMethod(Throwable.class, "getStackTrace", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        StackTraceElement[] stack = (StackTraceElement[]) param.getResult();
-                        if (stack == null) return;
-
-                        java.util.List<StackTraceElement> filtered = new java.util.ArrayList<>();
-                        boolean modified = false;
-                        for (StackTraceElement elem : stack) {
-                            String className = elem.getClassName();
-                            if (className.contains("xposed") || className.contains("Xposed")
-                                    || className.contains("lsposed") || className.contains("LSPosed")
-                                    || className.contains("HookTest")
-                                    || className.contains("de.robv.android.xposed")) {
-                                modified = true;
-                                continue;
-                            }
-                            filtered.add(elem);
-                        }
-                        if (modified) {
-                            param.setResult(filtered.toArray(new StackTraceElement[0]));
-                        }
-                    }
-                });
-                Log.e(TAG, "Throwable.getStackTrace Hook成功 (Xposed栈追踪绕过)");
-            } catch (Throwable t) {
-                Log.e(TAG, "Throwable.getStackTrace Hook失败: " + t.getMessage());
-            }
+            // 注意：暂时禁用，避免导致栈溢出或性能问题
+            // 改用其他方式绕过检测
+            Log.e(TAG, "跳过 Throwable.getStackTrace Hook (避免性能问题)");
 
             // ===== Hook System.getProperty 绕过属性检测 =====
             try {
@@ -1505,39 +1479,9 @@ public class Hook implements IXposedHookLoadPackage {
             }
 
             // ===== Hook ClassLoader.loadClass 绕过类加载检测 =====
-            // 检测Xposed的常用方法是尝试加载Xposed相关类
-            try {
-                XposedHelpers.findAndHookMethod(ClassLoader.class, "loadClass", String.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        String className = (String) param.args[0];
-                        if (className != null) {
-                            String lowerName = className.toLowerCase();
-                            if (lowerName.contains("de.robv.android.xposed")
-                                    || lowerName.contains("lsposed")
-                                    || lowerName.contains("xposed")
-                                    || lowerName.contains("com.lody.virtual")) {
-                                // 只有当调用者是安全检测类时才拦截
-                                Throwable th = new Throwable();
-                                StackTraceElement[] stack = th.getStackTrace();
-                                for (StackTraceElement elem : stack) {
-                                    String caller = elem.getClassName();
-                                    if (caller.contains("SecurityCheckUtil")
-                                            || caller.contains("VirtualApkCheckUtil")
-                                            || caller.contains("check")) {
-                                        Log.e(TAG, "拦截Xposed类加载检测: " + className);
-                                        param.setThrowable(new ClassNotFoundException(className));
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-                Log.e(TAG, "ClassLoader.loadClass Hook成功 (类加载检测绕过)");
-            } catch (Throwable t) {
-                Log.e(TAG, "ClassLoader.loadClass Hook失败: " + t.getMessage());
-            }
+            // 注意：暂时禁用，避免影响正常类加载导致APP崩溃
+            // Xposed检测通过其他方式绕过
+            Log.e(TAG, "跳过 ClassLoader.loadClass Hook (避免影响类加载)");
 
             // ===== Hook System.loadLibrary 绕过native层检测 =====
             // 注意：暂时不阻止so加载，避免APP崩溃，通过Java层hook绕过检测结果
