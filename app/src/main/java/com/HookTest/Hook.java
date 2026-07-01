@@ -1537,6 +1537,61 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "System.getProperty Hook失败: " + t.getMessage());
             }
 
+            // ===== Hook GDLocationUtil - 蓝月亮高德定位工具类（关键！） =====
+            // 设置notCheckMock标志，让APP跳过模拟位置检测
+            try {
+                Class<?> gdLocationUtilClass = cl.loadClass("cn.com.bluemoon.sfa.utils.location.GDLocationUtil");
+
+                // 【最重要】直接在类加载时就设置notCheckMock为true
+                // 这样APP一开始就不会进行模拟位置检测
+                try {
+                    XposedHelpers.setStaticObjectField(gdLocationUtilClass, "notCheckMock",
+                            new java.util.concurrent.atomic.AtomicBoolean(true));
+                    Log.e(TAG, "GDLocationUtil.notCheckMock 直接设置为true（最早期绕过）");
+                } catch (Throwable t) {
+                    Log.e(TAG, "设置notCheckMock失败: " + t.getMessage());
+                }
+
+                // hook checkMockSync方法，双重保险
+                try {
+                    de.robv.android.xposed.XposedBridge.hookAllMethods(gdLocationUtilClass, "checkMockSync", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                XposedHelpers.setStaticObjectField(gdLocationUtilClass, "notCheckMock",
+                                        new java.util.concurrent.atomic.AtomicBoolean(true));
+                            } catch (Throwable ignored) {}
+                            param.setResult(null);
+                            Log.e(TAG, "Hook checkMockSync: 阻止检测执行");
+                        }
+                    });
+                    Log.e(TAG, "GDLocationUtil.checkMockSync Hook成功");
+                } catch (Throwable t) {
+                    Log.e(TAG, "GDLocationUtil.checkMockSync Hook失败: " + t.getMessage());
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "GDLocationUtil Hook失败: " + t.getMessage());
+            }
+
+            // ===== Hook UmentEventTools - 阻止检测结果上报 =====
+            try {
+                Class<?> umentClass = cl.loadClass("cn.com.bluemoon.sfa.utils.UmentEventTools");
+                String[] mockMethods = {"sendCheckMock", "sendCheckMockC"};
+                for (final String methodName : mockMethods) {
+                    try {
+                        de.robv.android.xposed.XposedBridge.hookAllMethods(umentClass, methodName, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                param.setResult(null);
+                            }
+                        });
+                    } catch (Throwable ignored) {}
+                }
+                Log.e(TAG, "UmentEventTools.sendCheckMock Hook成功（阻止上报）");
+            } catch (Throwable t) {
+                Log.e(TAG, "UmentEventTools Hook失败: " + t.getMessage());
+            }
+
             Log.e(TAG, "所有反检测Hook执行完毕");
         } catch (Throwable t) {
             Log.e(TAG, "反检测Hook异常: " + t.getMessage());
@@ -1549,6 +1604,48 @@ public class Hook implements IXposedHookLoadPackage {
         try {
             ClassLoader cl = lpparam.classLoader;
             Class<?> aMapLocationClass = cl.loadClass("com.amap.api.location.AMapLocation");
+
+            // ====== 【重要】绕过高德SDK模拟位置检测 ======
+            // Hook AMapLocation.isMock() - 返回false表示不是模拟位置
+            try {
+                XposedHelpers.findAndHookMethod(aMapLocationClass, "isMock", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        param.setResult(false);
+                    }
+                });
+                Log.e(TAG, "AMapLocation.isMock Hook成功（绕过模拟位置检测）");
+            } catch (Throwable t) {
+                Log.e(TAG, "AMapLocation.isMock Hook失败: " + t.getMessage());
+            }
+
+            // Hook AMapLocationQualityReport.isInstalledHighDangerMockApp() - 高危模拟应用检测
+            try {
+                Class<?> qualityReportClass = cl.loadClass("com.amap.api.location.AMapLocationQualityReport");
+                XposedHelpers.findAndHookMethod(qualityReportClass, "isInstalledHighDangerMockApp", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        param.setResult(false);
+                    }
+                });
+                Log.e(TAG, "AMapLocationQualityReport.isInstalledHighDangerMockApp Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "AMapLocationQualityReport Hook失败: " + t.getMessage());
+            }
+
+            // Hook AMapLocationClientOption.setMockEnable - 阻止启用模拟位置
+            try {
+                Class<?> optionClass = cl.loadClass("com.amap.api.location.AMapLocationClientOption");
+                XposedHelpers.findAndHookMethod(optionClass, "setMockEnable", boolean.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        param.args[0] = false;
+                    }
+                });
+                Log.e(TAG, "AMapLocationClientOption.setMockEnable Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "AMapLocationClientOption.setMockEnable Hook失败: " + t.getMessage());
+            }
 
             // ====== 上游Hook: 在SDK将坐标传递给逆地理编码之前就替换坐标 ======
             // Hook AMapLocationClient.getLastKnownLocation - 返回模拟位置
@@ -1970,6 +2067,19 @@ public class Hook implements IXposedHookLoadPackage {
     private void hookSystemLocation(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             ClassLoader cl = lpparam.classLoader;
+
+            // Hook Location.isFromMockProvider - 绕过系统模拟位置检测
+            try {
+                XposedHelpers.findAndHookMethod("android.location.Location", cl, "isFromMockProvider", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        param.setResult(false);
+                    }
+                });
+                Log.e(TAG, "Location.isFromMockProvider Hook成功（绕过系统模拟位置检测）");
+            } catch (Throwable t) {
+                Log.e(TAG, "Location.isFromMockProvider Hook失败: " + t.getMessage());
+            }
 
             // Hook Location.getLatitude
             XposedHelpers.findAndHookMethod("android.location.Location", cl, "getLatitude", new XC_MethodHook() {
