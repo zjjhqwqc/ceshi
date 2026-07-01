@@ -1337,10 +1337,9 @@ public class Hook implements IXposedHookLoadPackage {
                         if (point != null) {
                             double origLat = (Double) XposedHelpers.callMethod(point, "getLatitude");
                             double origLng = (Double) XposedHelpers.callMethod(point, "getLongitude");
-                            // 创建新的模拟坐标点
-                            Object mockPoint = XposedHelpers.newInstance(latLonPointClass,
-                                    Double.parseDouble(latStr), Double.parseDouble(lngStr));
-                            param.args[0] = mockPoint;
+                            // 直接修改传入的point对象的坐标
+                            XposedHelpers.callMethod(point, "setLatitude", Double.parseDouble(latStr));
+                            XposedHelpers.callMethod(point, "setLongitude", Double.parseDouble(lngStr));
                             Log.e(TAG, "Hook RegeocodeQuery构造函数: 原始坐标 " + origLat + "," + origLng
                                     + " -> 替换为 " + latStr + "," + lngStr);
                         }
