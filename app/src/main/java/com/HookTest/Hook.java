@@ -1688,113 +1688,111 @@ public class Hook implements IXposedHookLoadPackage {
     /**
      * 最源头的虚拟定位方案：直接hook系统LocationManager
      * 在系统回调LocationListener.onLocationChanged时就替换坐标
-     * 这样所有上层SDK（高德、腾讯等）拿到的都是模拟坐标
+    // ======================== Hook 定位（Location类全拦截方案） ========================
+
+    /**
+     * 最稳妥的虚拟定位方案：直接hook android.location.Location类
+     * 所有定位SDK（高德、百度、腾讯、系统）最终都会创建/修改Location对象
+     * 从Location类层面拦截，100%确保坐标被替换
      */
     private void hookSystemLocation(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             ClassLoader cl = lpparam.classLoader;
+            final Class<?> locationClass = android.location.Location.class;
 
-            // ====== 【最核心】Hook LocationManager.requestLocationUpdates ======
-            // 用动态代理包装所有LocationListener，在系统回调时就替换坐标
+            // ====== 1. Hook所有构造函数 - 创建Location时就设置模拟坐标 ======
             try {
-                Class<?> locationListenerClass = cl.loadClass("android.location.LocationListener");
-                final java.util.Map<Object, Object> listenerProxyMap = new java.util.concurrent.ConcurrentHashMap<>();
-
-                // hook requestLocationUpdates 和 requestSingleUpdate
-                String[] requestMethods = {
-                        "requestLocationUpdates",
-                        "requestSingleUpdate"
-                };
-
-                for (final String methodName : requestMethods) {
-                    try {
-                        de.robv.android.xposed.XposedBridge.hookAllMethods(
-                                android.location.LocationManager.class, methodName, new XC_MethodHook() {
-                            @Override
-                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                                SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                                if (!sh.getBoolean("locationEnabled", false)) return;
-
-                                final String latStr = sh.getString("lat", "");
-                                final String lngStr = sh.getString("lng", "");
-                                if (latStr.isEmpty() || lngStr.isEmpty()) return;
-
-                                // 找到LocationListener参数，用代理替换
-                                for (int i = 0; i < param.args.length; i++) {
-                                    if (param.args[i] != null && param.args[i] instanceof android.location.LocationListener) {
-                                        final android.location.LocationListener originalListener =
-                                                (android.location.LocationListener) param.args[i];
-
-                                        if (java.lang.reflect.Proxy.isProxyClass(originalListener.getClass())) {
-                                            return;
-                                        }
-
-                                        Object proxy = java.lang.reflect.Proxy.newProxyInstance(
-                                                locationListenerClass.getClassLoader(),
-                                                new Class<?>[]{locationListenerClass},
-                                                new java.lang.reflect.InvocationHandler() {
-                                                    @Override
-                                                    public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args) throws Throwable {
-                                                        if ("onLocationChanged".equals(method.getName())
-                                                                && args != null && args.length > 0
-                                                                && args[0] instanceof android.location.Location) {
-                                                            android.location.Location location = (android.location.Location) args[0];
-                                                            try {
-                                                                location.setLatitude(Double.parseDouble(latStr));
-                                                                location.setLongitude(Double.parseDouble(lngStr));
-                                                                // 清除mock标记
-                                                                try {
-                                                                    java.lang.reflect.Field mockField = android.location.Location.class.getDeclaredField("mIsFromMockProvider");
-                                                                    mockField.setAccessible(true);
-                                                                    mockField.setBoolean(location, false);
-                                                                } catch (Throwable ignored) {}
-                                                            } catch (Throwable ignored) {}
-                                                        }
-                                                        return method.invoke(originalListener, args);
-                                                    }
-                                                }
-                                        );
-                                        param.args[i] = proxy;
-                                        listenerProxyMap.put(originalListener, proxy);
-                                        Log.e(TAG, "Hook " + methodName + ": 已安装最上游代理");
-                                        break;
-                                    }
-                                }
-                            }
-                        });
-                        Log.e(TAG, "LocationManager." + methodName + " Hook成功");
-                    } catch (Throwable t) {
-                        Log.e(TAG, "LocationManager." + methodName + " Hook失败: " + t.getMessage());
+                // 无参构造
+                XposedHelpers.findAndHookConstructor(locationClass, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        setMockLocation((android.location.Location) param.thisObject);
                     }
-                }
-
-                // hook removeUpdates
-                try {
-                    de.robv.android.xposed.XposedBridge.hookAllMethods(
-                            android.location.LocationManager.class, "removeUpdates", new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            for (int i = 0; i < param.args.length; i++) {
-                                if (param.args[i] != null && param.args[i] instanceof android.location.LocationListener) {
-                                    Object original = param.args[i];
-                                    Object proxy = listenerProxyMap.get(original);
-                                    if (proxy != null) {
-                                        param.args[i] = proxy;
-                                        listenerProxyMap.remove(original);
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    });
-                } catch (Throwable ignored) {}
+                });
+                // String provider构造
+                XposedHelpers.findAndHookConstructor(locationClass, String.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        setMockLocation((android.location.Location) param.thisObject);
+                    }
+                });
+                // Location copy构造
+                XposedHelpers.findAndHookConstructor(locationClass, android.location.Location.class, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        setMockLocation((android.location.Location) param.thisObject);
+                    }
+                });
+                Log.e(TAG, "Location构造函数Hook成功");
             } catch (Throwable t) {
-                Log.e(TAG, "LocationManager Hook失败: " + t.getMessage());
+                Log.e(TAG, "Location构造函数Hook失败: " + t.getMessage());
             }
 
-            // ====== Hook Location.isFromMockProvider - 清除模拟位置标记 ======
+            // ====== 2. Hook setLatitude/setLongitude - 设置坐标时替换 ======
             try {
-                XposedHelpers.findAndHookMethod("android.location.Location", cl, "isFromMockProvider", new XC_MethodHook() {
+                XposedHelpers.findAndHookMethod(locationClass, "setLatitude", double.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        Double mockLat = getMockLatitude();
+                        if (mockLat != null) {
+                            param.args[0] = mockLat;
+                        }
+                    }
+                });
+                Log.e(TAG, "Location.setLatitude Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "Location.setLatitude Hook失败: " + t.getMessage());
+            }
+
+            try {
+                XposedHelpers.findAndHookMethod(locationClass, "setLongitude", double.class, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        Double mockLng = getMockLongitude();
+                        if (mockLng != null) {
+                            param.args[0] = mockLng;
+                        }
+                    }
+                });
+                Log.e(TAG, "Location.setLongitude Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "Location.setLongitude Hook失败: " + t.getMessage());
+            }
+
+            // ====== 3. Hook getLatitude/getLongitude - 读取坐标时返回模拟值 ======
+            try {
+                XposedHelpers.findAndHookMethod(locationClass, "getLatitude", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        Double mockLat = getMockLatitude();
+                        if (mockLat != null) {
+                            param.setResult(mockLat);
+                        }
+                    }
+                });
+                Log.e(TAG, "Location.getLatitude Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "Location.getLatitude Hook失败: " + t.getMessage());
+            }
+
+            try {
+                XposedHelpers.findAndHookMethod(locationClass, "getLongitude", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        Double mockLng = getMockLongitude();
+                        if (mockLng != null) {
+                            param.setResult(mockLng);
+                        }
+                    }
+                });
+                Log.e(TAG, "Location.getLongitude Hook成功");
+            } catch (Throwable t) {
+                Log.e(TAG, "Location.getLongitude Hook失败: " + t.getMessage());
+            }
+
+            // ====== 4. Hook isFromMockProvider - 清除模拟位置标记 ======
+            try {
+                XposedHelpers.findAndHookMethod(locationClass, "isFromMockProvider", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         param.setResult(false);
@@ -1805,60 +1803,31 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "Location.isFromMockProvider Hook失败: " + t.getMessage());
             }
 
-            // ====== Hook Location.getLatitude/getLongitude - 兜底 ======
-            try {
-                XposedHelpers.findAndHookMethod("android.location.Location", cl, "getLatitude", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String latStr = sh.getString("lat", "");
-                        if (latStr.isEmpty()) return;
-                        try {
-                            param.setResult(Double.parseDouble(latStr));
-                        } catch (NumberFormatException ignored) {}
-                    }
-                });
-                Log.e(TAG, "Location.getLatitude Hook成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "Location.getLatitude Hook失败: " + t.getMessage());
-            }
-
-            try {
-                XposedHelpers.findAndHookMethod("android.location.Location", cl, "getLongitude", new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String lngStr = sh.getString("lng", "");
-                        if (lngStr.isEmpty()) return;
-                        try {
-                            param.setResult(Double.parseDouble(lngStr));
-                        } catch (NumberFormatException ignored) {}
-                    }
-                });
-                Log.e(TAG, "Location.getLongitude Hook成功");
-            } catch (Throwable t) {
-                Log.e(TAG, "Location.getLongitude Hook失败: " + t.getMessage());
-            }
-
-            // ====== Hook LocationManager.getLastKnownLocation - 兜底 ======
+            // ====== 5. Hook LocationManager.getLastKnownLocation - 兜底 ======
             try {
                 XposedHelpers.findAndHookMethod("android.location.LocationManager", cl,
                         "getLastKnownLocation", String.class, new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-                        if (!sh.getBoolean("locationEnabled", false)) return;
-                        String latStr = sh.getString("lat", "");
-                        String lngStr = sh.getString("lng", "");
-                        if (latStr.isEmpty() || lngStr.isEmpty()) return;
+                        Double mockLat = getMockLatitude();
+                        Double mockLng = getMockLongitude();
+                        if (mockLat == null || mockLng == null) return;
                         android.location.Location loc = (android.location.Location) param.getResult();
                         if (loc == null) {
                             loc = new android.location.Location(android.location.LocationManager.GPS_PROVIDER);
                         }
-                        loc.setLatitude(Double.parseDouble(latStr));
-                        loc.setLongitude(Double.parseDouble(lngStr));
+                        // 注意：这里直接用反射设字段，避免触发我们hook的set方法
+                        try {
+                            java.lang.reflect.Field latField = android.location.Location.class.getDeclaredField("mLatitude");
+                            java.lang.reflect.Field lngField = android.location.Location.class.getDeclaredField("mLongitude");
+                            latField.setAccessible(true);
+                            lngField.setAccessible(true);
+                            latField.setDouble(loc, mockLat);
+                            lngField.setDouble(loc, mockLng);
+                        } catch (Throwable e) {
+                            loc.setLatitude(mockLat);
+                            loc.setLongitude(mockLng);
+                        }
                         param.setResult(loc);
                     }
                 });
@@ -1867,9 +1836,120 @@ public class Hook implements IXposedHookLoadPackage {
                 Log.e(TAG, "getLastKnownLocation Hook失败: " + t.getMessage());
             }
 
-            Log.e(TAG, "系统定位Hook完成（最源头方案）");
+            // ====== 6. Hook LocationManager.requestLocationUpdates - 代理监听器（补充） ======
+            try {
+                Class<?> locationListenerClass = cl.loadClass("android.location.LocationListener");
+                final java.util.Map<Object, Object> listenerProxyMap = new java.util.concurrent.ConcurrentHashMap<>();
+
+                String[] requestMethods = { "requestLocationUpdates", "requestSingleUpdate" };
+                for (final String methodName : requestMethods) {
+                    try {
+                        de.robv.android.xposed.XposedBridge.hookAllMethods(
+                                android.location.LocationManager.class, methodName, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                                if (getMockLatitude() == null || getMockLongitude() == null) return;
+                                for (int i = 0; i < param.args.length; i++) {
+                                    if (param.args[i] != null && param.args[i] instanceof android.location.LocationListener) {
+                                        final android.location.LocationListener originalListener =
+                                                (android.location.LocationListener) param.args[i];
+                                        if (java.lang.reflect.Proxy.isProxyClass(originalListener.getClass())) return;
+
+                                        Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+                                                locationListenerClass.getClassLoader(),
+                                                new Class<?>[]{locationListenerClass},
+                                                new java.lang.reflect.InvocationHandler() {
+                                                    @Override
+                                                    public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args) throws Throwable {
+                                                        return method.invoke(originalListener, args);
+                                                    }
+                                                }
+                                        );
+                                        param.args[i] = proxy;
+                                        listenerProxyMap.put(originalListener, proxy);
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    } catch (Throwable ignored) {}
+                }
+
+                // removeUpdates
+                try {
+                    de.robv.android.xposed.XposedBridge.hookAllMethods(
+                            android.location.LocationManager.class, "removeUpdates", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            for (int i = 0; i < param.args.length; i++) {
+                                if (param.args[i] != null && param.args[i] instanceof android.location.LocationListener) {
+                                    Object proxy = listenerProxyMap.get(param.args[i]);
+                                    if (proxy != null) {
+                                        param.args[i] = proxy;
+                                        listenerProxyMap.remove(param.args[i]);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                } catch (Throwable ignored) {}
+                Log.e(TAG, "LocationManager监听器代理Hook成功（补充）");
+            } catch (Throwable t) {
+                Log.e(TAG, "LocationManager代理Hook失败: " + t.getMessage());
+            }
+
+            Log.e(TAG, "定位Hook完成（Location类全拦截方案）");
         } catch (Throwable t) {
-            Log.e(TAG, "系统定位Hook异常", t);
+            Log.e(TAG, "定位Hook异常", t);
+        }
+    }
+
+    // 工具方法：获取模拟纬度
+    private Double getMockLatitude() {
+        if (appContext == null) return null;
+        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        if (!sh.getBoolean("locationEnabled", false)) return null;
+        String latStr = sh.getString("lat", "");
+        if (latStr.isEmpty()) return null;
+        try {
+            return Double.parseDouble(latStr);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    // 工具方法：获取模拟经度
+    private Double getMockLongitude() {
+        if (appContext == null) return null;
+        SharedPreferences sh = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        if (!sh.getBoolean("locationEnabled", false)) return null;
+        String lngStr = sh.getString("lng", "");
+        if (lngStr.isEmpty()) return null;
+        try {
+            return Double.parseDouble(lngStr);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    // 工具方法：设置Location对象为模拟坐标
+    private void setMockLocation(android.location.Location location) {
+        Double mockLat = getMockLatitude();
+        Double mockLng = getMockLongitude();
+        if (mockLat == null || mockLng == null) return;
+        try {
+            // 直接反射设字段，避免触发我们hook的set方法
+            java.lang.reflect.Field latField = android.location.Location.class.getDeclaredField("mLatitude");
+            java.lang.reflect.Field lngField = android.location.Location.class.getDeclaredField("mLongitude");
+            latField.setAccessible(true);
+            lngField.setAccessible(true);
+            latField.setDouble(location, mockLat);
+            lngField.setDouble(location, mockLng);
+        } catch (Throwable e) {
+            // fallback
+            location.setLatitude(mockLat);
+            location.setLongitude(mockLng);
         }
     }
 
